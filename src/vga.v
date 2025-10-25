@@ -1,4 +1,4 @@
-`timescale 1ns / 1ps
+//`timescale 1ns / 1ps
 //`default_nettype none
 
 // 640x480 @60Hz

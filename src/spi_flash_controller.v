@@ -37,7 +37,7 @@
 */
 
 //`default_nettype wire
-`timescale 1ns / 1ps
+//`timescale 1ns / 1ps
 
 module spi_flash_controller #(parameter DATA_WIDTH_BITS=4, parameter ADDR_BITS=24) (
     input clk,

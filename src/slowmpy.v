@@ -46,7 +46,7 @@
 //		- use i_reset to init all reg
 //		- LGNA = 4, NA = 16
 
-`timescale 1ns / 1ps
+//`timescale 1ns / 1ps
 //`default_nettype	none
 
 module	slowmpy #(
