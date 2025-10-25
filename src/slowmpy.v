@@ -86,7 +86,7 @@ module	slowmpy #(
 	assign	pre_done = (count == 0);
 
 	// almost_done
-	always @(posedge i_clk) begin
+	always @(posedge i_clk or posedge i_reset) begin
 		almost_done <= (!i_reset)&&(o_busy)&&(pre_done);
 	end
 
