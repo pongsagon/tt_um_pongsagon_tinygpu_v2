@@ -202,7 +202,7 @@ module vsfs (
 
 
     
-	always @(posedge clk or posedge reset) begin
+	always @(posedge clk) begin
     if(reset) begin
     	fsm_state <= 0;
     	read_delay <= 0;

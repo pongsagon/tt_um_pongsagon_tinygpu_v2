@@ -57,7 +57,7 @@ module div #(
     localparam SIGN = 4;
     // enum cant syn to ASIC
     //enum {IDLE, INIT, CALC, ROUND, SIGN} state; 
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         done <= 0;
         case (state)
             INIT: begin

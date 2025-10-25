@@ -110,7 +110,7 @@ module spi_flash_controller #(parameter DATA_WIDTH_BITS=4, parameter ADDR_BITS=2
     assign spi_clk_out = !clk && (fsm_state > 0);
 
 
-    always @(posedge clk or negedge rstn) begin
+    always @(posedge clk) begin
         if (!rstn || stop_txn ) begin
             fsm_state <= FSM_IDLE;
             is_writing <= 0;

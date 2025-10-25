@@ -43,7 +43,7 @@ module dot4(
     reg [2:0] state;		// 5 states
     reg signed [15:0] tmp_vs_mul1;
 
-    always @(posedge clk or posedge reset) begin
+    always @(posedge clk) begin
     	if (reset) begin
     		mul_a <= 0;
 			mul_b <= 0;

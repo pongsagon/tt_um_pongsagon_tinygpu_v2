@@ -245,7 +245,7 @@ module tt_um_pongsagon_tinygpu_v2 (
   assign uo_out[6] = (setblack_?0:spi_data[0]);
   
 
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk) begin
     if(!rst_n) begin
       fsm_state <= 0;
       read_delay <= 0;
