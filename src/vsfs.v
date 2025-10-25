@@ -124,23 +124,23 @@ module vsfs (
   			,.i_b(mul_b),.i_aux(1'b0),.o_done(mul_done),.o_p(mul_result)
   			,.o_busy(mul_busy),.o_aux(mul_aux));
 
-  reg dot_start;
-  wire dot_done;
-  // use in always @(*), not infer registers (that's not what declare the signal of reg type means), 
-  // it infers a multiplexer with constant assignment 
-  reg signed [15:0] v1_x;			
-	reg signed [15:0] v1_y;
-	reg signed [15:0] v1_z;
-	reg signed [15:0] v1_w;
-	reg signed [15:0] v2_x;
-	reg signed [15:0] v2_y;
-	reg signed [15:0] v2_z;
-	reg signed [15:0] v2_w;
-  wire signed [15:0] dot_result;
-  dot4 dot (.clk (clk), .reset(reset),.start(dot_start)
-  			,.v1_x(v1_x),.v1_y(v1_y),.v1_z(v1_z),.v1_w(v1_w)
-  			,.v2_x(v2_x),.v2_y(v2_y),.v2_z(v2_z),.v2_w(v2_w)
-  			,.done(dot_done),.result(dot_result));
+  // reg dot_start;
+  // wire dot_done;
+  // // use in always @(*), not infer registers (that's not what declare the signal of reg type means), 
+  // // it infers a multiplexer with constant assignment 
+  // reg signed [15:0] v1_x;			
+	// reg signed [15:0] v1_y;
+	// reg signed [15:0] v1_z;
+	// reg signed [15:0] v1_w;
+	// reg signed [15:0] v2_x;
+	// reg signed [15:0] v2_y;
+	// reg signed [15:0] v2_z;
+	// reg signed [15:0] v2_w;
+  // wire signed [15:0] dot_result;
+  // dot4 dot (.clk (clk), .reset(reset),.start(dot_start)
+  			// ,.v1_x(v1_x),.v1_y(v1_y),.v1_z(v1_z),.v1_w(v1_w)
+  			// ,.v2_x(v2_x),.v2_y(v2_y),.v2_z(v2_z),.v2_w(v2_w)
+  			// ,.done(dot_done),.result(dot_result));
 
  
  	// main FSM
