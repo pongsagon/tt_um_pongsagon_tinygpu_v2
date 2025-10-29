@@ -125,11 +125,11 @@ module tt_um_pongsagon_tinygpu_v2 (
   wire [3:0] vsfs_data_in;
   wire do_swap;
   reg start_vsfs;
-  reg [8:0] numtri;         // <512 tri
+  reg [9:0] numtri;         // <1024 tri
 
 
   // main FSM
-  parameter   SLOWEST_STATE       = 75;   // 55 RW time + 16 wait + 4 safe = 75
+  parameter   SLOWEST_STATE       = 85;   // 65 RW time + 16 wait + 4 safe = 85
   reg [4:0] fsm_state;        // 0-31: state
   reg [4:0] read_delay;       // flash: 24, RAM R: 16,
   reg [17:0] numread;         // #4bit read, >153600 (#z pixel)
@@ -139,9 +139,10 @@ module tt_um_pongsagon_tinygpu_v2 (
   reg [16:0] drawPixel;       // >76800 (320x240), draw @pixel
   wire [9:0] yplus1;          // to set addr for the next line
   assign yplus1 = y + 1;
-  reg [13:0] i_numtri_byte;   // for loop read numtri
-  wire [13:0] numtri_byte;     // numtri * 18 (2 xyz x 3);
-  assign numtri_byte = {1'b0,numtri,4'b0000} + {4'b0,numtri,1'b0};
+  //
+  reg [14:0] i_numtri_byte;   // for loop read numtri
+  wire [14:0] numtri_byte;     // numtri * 22 (2 x 3xyz x 3vert + 4 (normal/color));
+  assign numtri_byte = {1'b0,numtri,4'b0} + {3'b0,numtri,2'b0} + {4'b0,numtri,1'b0};
   //
   reg display_start_read;
   reg display_start_write;
@@ -317,27 +318,18 @@ module tt_um_pongsagon_tinygpu_v2 (
             display_stop_txn <= 1;
             fsm_state <= 5;
           end
-
-          // if(numread == 4)begin
-          //   numread <= 0;
-          //   display_stop_txn <= 1;
-          //   fsm_state <= 5;
-          // end else begin
-          //   pixels[numread[1:0]] <= spi_data;
-          //   numread <= numread + 1;
-          // end
         end
         //   -- save to numtri, little endian -> big endian
         5: begin
           display_stop_txn <= 0;
-          numtri[8] <= pixels[3][0];
+          numtri[9:8] <= pixels[3][1:0];
           numtri[3:0] <= pixels[1];
           numtri[7:4] <= pixels[0];
           i_numtri_byte <= 0;
           display_addr <= 2;
           fsm_state <= 6;
         end
-        //  - for loop copy each vertex: XY screen Q16.0, Z screen 0.16
+        //  - for loop copy each vertex: XYZ Q8.8 x3 + color/face_normal.zyx 4 byte
         6: begin
           display_stop_txn <= 0;
           numread <= 0;
@@ -372,22 +364,13 @@ module tt_um_pongsagon_tinygpu_v2 (
             display_stop_txn <= 1;
             fsm_state <= 9;
           end
-
-          // if(numread == 4)begin
-          //   numread <= 0;
-          //   display_stop_txn <= 1;
-          //   fsm_state <= 9;
-          // end else begin
-          //   pixels[numread[1:0]] <= spi_data;
-          //   numread <= numread + 1;
-          // end
         end
         //   -- init to write to RAM tri, little endian -> big endian
         9: begin
           display_stop_txn <= 0;
           spi_select_ROM <= 0;
           display_start_write <= 1;
-          display_addr <= 24'd153600 + {10'b0,i_numtri_byte};
+          display_addr <= 24'd153600 + {9'b0,i_numtri_byte};
           display_data_in <= pixels[numread[1:0] + 2'b10];
           numread <= numread + 1;
           fsm_state <= 10;
@@ -401,26 +384,11 @@ module tt_um_pongsagon_tinygpu_v2 (
             if(numread == 3) begin
               numread <= 0;
               display_stop_txn <= 1;
-              display_addr <= {10'b0,i_numtri_byte} + 4; // 4 = offset #tri 2byte + next 2 byte
+              display_addr <= {9'b0,i_numtri_byte} + 4; // 4 = offset #tri 2byte + next 2 byte
               i_numtri_byte <= i_numtri_byte + 2;
               fsm_state <= 6;
             end
           end
-
-
-          // if(numread == 4)begin
-          //   numread <= 0;
-          //   display_stop_txn <= 1;
-          //   display_addr <= {10'b0,i_numtri_byte} + 4; // 4 = offset #tri 2byte + next 2 byte
-          //   i_numtri_byte <= i_numtri_byte + 2;
-          //   fsm_state <= 6;
-          // end else if(spi_data_req)begin
-          //   display_data_in <= pixels[numread[1:0] + 2'b10];
-          //   if(numread == 3) begin
-          //     display_stop_txn <= 1;
-          //   end
-          //   numread <= numread + 1;
-          // end
         end
 
       // 2. RAM front -> vga uo_out[] + clear Back (fsm 11 - 16)
@@ -471,24 +439,6 @@ module tt_um_pongsagon_tinygpu_v2 (
               fsm_state <= 11;
             end
           end
-
-          // if(numread == 320) begin              //mark2,
-          //   numread <= 0;
-          //   display_stop_txn <= 1;
-          //   if (sub_frame == 1) begin
-          //     // do clear back
-          //     fsm_state <= 14;
-          //   end else  if (y < 239) begin
-          //     // go to wait for eol 
-          //     fsm_state <= 16;
-          //   end else begin
-          //     // go to wait for eof
-          //     fsm_state <= 11;
-          //   end
-          // end
-          // else begin
-          //   numread <= numread + 1;
-          // end
         end
         // - switch to clear back 1 line
         14: begin
@@ -517,19 +467,6 @@ module tt_um_pongsagon_tinygpu_v2 (
               end
             end
           end
-
-          // if(numread == 319)begin 
-          //   numread <= 0;            
-          //   display_stop_txn <= 1;
-          //   if (y == 239) begin               //mark5: to clearZ
-          //     fsm_state <= 17;
-          //   end else begin                    //mark3
-          //     fsm_state <= 16;
-          //   end
-          // end else if(spi_data_req)begin
-          //   display_data_in <= 4'b0000;
-          //   numread <= numread + 1;
-          // end
         end
         // - wait for eol state, start read 16 clk ahead of the next line
         // enter here from 13 OR 15
@@ -565,17 +502,6 @@ module tt_um_pongsagon_tinygpu_v2 (
               fsm_state <= 11;
             end
           end
-
-          // if (numread == 153599)begin       //mark6
-          //   numread <= 0;
-          //   display_stop_txn <= 1;
-          //   drawPixel <= 0;          
-          //   start_vsfs <= 1;
-          //   fsm_state <= 11;
-          // end else if(spi_data_req)begin
-          //   display_data_in <= 4'b1111;
-          //   numread <= numread + 1;
-          // end
         end
 
 

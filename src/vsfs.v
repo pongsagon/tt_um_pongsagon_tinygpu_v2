@@ -9,15 +9,28 @@
   - addr Tri start at 153600
 
   color
+  	0: black
   	1: blue
   	2: dark green
-
-
+		15:
+ 
   VSFS
-		//0. user input -> [M][MVP][M]-1, 40 states
-    1. for each tri
-    	- READ tri 
+		//0. perframe, state [150-250]
+			- Tz, rotx2 -> [M] ([Tz*Rx*Ry]) // cos table, set premul mat manually 
+			- dir light rot 1axis -> update formula
+			- [M]*[VP] 			// no cam fix [VP]
+			- [M]-1 ([Ryt*Rxt*Tz-1]) // override [M], for light-world, campos-world -> model 
+			- [M-1]*campos 
+			- [M-1]*lightpos 
+
+    1. for each tri, state [31-129, 254,255]
+    	- READ tri (pos.xyz x3 Q8.8, face normal Q2.8 x3, color 2bit)
+
     //2. VS
+			- x1: backface culling (view-model dot faceNormal-model)
+			- x3: [MVP]*v, clip->NDC (div), NDC->screen
+			- x1: light-model dot faceNormal-model
+
     3. bbox
       - bbox (mul of 4, not chk outofrange, 3clk)   
     4. e0, bar, zbar
@@ -35,9 +48,6 @@
         //
         - WRITE x4 Z+B (28 clk) 
  
-
- 	Don't know why?, not cause problems
- 		- state 33, spi_data still output another 16bit(4clk) after stop read from RAM
 
 */
 
@@ -59,21 +69,27 @@ module vsfs (
   	output  reg 				vsfs_running,
   	input 	wire [9:0]  x,
   	input 	wire [9:0]  y,
-  	input		wire [8:0]	numtri,
+  	input		wire [9:0]	numtri,
   	input   wire 				evenframe,
+
+  	//+ gamepad input
   	
 
     // things to watch
-    // output  wire [19:0] debug_x_screen_v0,
-    // output  wire [19:0] debug_x_screen_v1,
-    // output  wire [19:0] debug_x_screen_v2,
-    // output  wire [19:0] debug_y_screen_v0,
-    // output  wire [19:0] debug_y_screen_v1,
-    // output  wire [19:0] debug_y_screen_v2,
-    // output  wire [21:0] debug_z_screen_v0,
-    // output  wire [21:0] debug_z_screen_v1,
-    // output  wire [21:0] debug_z_screen_v2,
-    // output  wire [7:0]  debug_vsfs_fsm_state,
+    output  wire [15:0] debug_x_model_v0,
+    output  wire [15:0] debug_x_model_v1,
+    output  wire [15:0] debug_x_model_v2,
+    output  wire [15:0] debug_y_model_v0,
+    output  wire [15:0] debug_y_model_v1,
+    output  wire [15:0] debug_y_model_v2,
+    output  wire [15:0] debug_z_model_v0,
+    output  wire [15:0] debug_z_model_v1,
+    output  wire [15:0] debug_z_model_v2,
+    output  wire [15:0] debug_nx,
+    output  wire [15:0] debug_ny,
+    output  wire [15:0] debug_nz,
+    output  wire [1:0] debug_tri_color,
+    output  wire [7:0]  debug_vsfs_fsm_state,
 
     input		wire 				ram_notbusy
 
@@ -124,48 +140,116 @@ module vsfs (
   			,.i_b(mul_b),.i_aux(1'b0),.o_done(mul_done),.o_p(mul_result)
   			,.o_busy(mul_busy),.o_aux(mul_aux));
 
-  // reg dot_start;
-  // wire dot_done;
-  // // use in always @(*), not infer registers (that's not what declare the signal of reg type means), 
-  // // it infers a multiplexer with constant assignment 
-  // reg signed [15:0] v1_x;			
-	// reg signed [15:0] v1_y;
-	// reg signed [15:0] v1_z;
-	// reg signed [15:0] v1_w;
-	// reg signed [15:0] v2_x;
-	// reg signed [15:0] v2_y;
-	// reg signed [15:0] v2_z;
-	// reg signed [15:0] v2_w;
-  // wire signed [15:0] dot_result;
-  // dot4 dot (.clk (clk), .reset(reset),.start(dot_start)
-  			// ,.v1_x(v1_x),.v1_y(v1_y),.v1_z(v1_z),.v1_w(v1_w)
-  			// ,.v2_x(v2_x),.v2_y(v2_y),.v2_z(v2_z),.v2_w(v2_w)
-  			// ,.done(dot_done),.result(dot_result));
+  reg dot_start;
+  wire dot_done;
+  // use in always @(*), not infer registers (that's not what declare the signal of reg type means), 
+  // it infers a multiplexer with constant assignment 
+  reg signed [15:0] v1_x;			
+	reg signed [15:0] v1_y;
+	reg signed [15:0] v1_z;
+	reg signed [15:0] v1_w;
+	reg signed [15:0] v2_x;
+	reg signed [15:0] v2_y;
+	reg signed [15:0] v2_z;
+	reg signed [15:0] v2_w;
+  wire signed [15:0] dot_result;
+  dot4 dot (.clk (clk), .reset(reset),.start(dot_start)
+  			,.v1_x(v1_x),.v1_y(v1_y),.v1_z(v1_z),.v1_w(v1_w)
+  			,.v2_x(v2_x),.v2_y(v2_y),.v2_z(v2_z),.v2_w(v2_w)
+  			,.done(dot_done),.result(dot_result));
 
  
  	// main FSM
 	reg [7:0] fsm_state; 
+	// [M]/[M-1] (use the same reg), [MVP] (row major)
+	reg signed [15:0] M_00;					// Q8.8
+	reg signed [15:0] M_01;
+	reg signed [15:0] M_02;
+	reg signed [15:0] M_03;
+	reg signed [15:0] M_10;					
+	reg signed [15:0] M_11;
+	reg signed [15:0] M_12;
+	reg signed [15:0] M_13;
+	reg signed [15:0] M_20;					
+	reg signed [15:0] M_21;
+	reg signed [15:0] M_22;
+	reg signed [15:0] M_23;
+	reg signed [15:0] M_30;					
+	reg signed [15:0] M_31;
+	reg signed [15:0] M_32;
+	reg signed [15:0] M_33;
+	reg signed [15:0] MVP_00;					// Q8.8
+	reg signed [15:0] MVP_01;
+	reg signed [15:0] MVP_02;
+	reg signed [15:0] MVP_03;
+	reg signed [15:0] MVP_10;					
+	reg signed [15:0] MVP_11;
+	reg signed [15:0] MVP_12;
+	reg signed [15:0] MVP_13;
+	reg signed [15:0] MVP_20;					
+	reg signed [15:0] MVP_21;
+	reg signed [15:0] MVP_22;
+	reg signed [15:0] MVP_23;
+	reg signed [15:0] MVP_30;					
+	reg signed [15:0] MVP_31;
+	reg signed [15:0] MVP_32;
+	reg signed [15:0] MVP_33;
+	// read tri from RAM
 	reg [4:0] read_delay;
 	reg [17:0] numread;  
-	reg [8:0] tri_idx;
-	wire [13:0] tri_idx_addr;     		// numtri * 18 (2 xyz x 3);
-  assign tri_idx_addr = {1'b0,tri_idx,4'b0000} + {4'b0,tri_idx,1'b0};
-	reg signed [15:0] tri_xyz [8:0];		// read screenspace for now xy Q16.0, z Q0.16, final version is model space
-	//
-	reg signed [19:0] x_screen_v0;			// Q20.0, Q8.8 from file
+	reg [9:0] tri_idx;									// max 1024 tri
+	wire [14:0] tri_idx_addr;     			// in byte: numtri * 22 (2 x 3xyz x 3vert + 4 (normal/color));
+  assign tri_idx_addr = {1'b0,tri_idx,4'b0000} + {3'b0,tri_idx,2'b0} + {4'b0,tri_idx,1'b0};
+	reg signed [15:0] tri_xyz [10:0];		// 
+	// model space/NDC (use the same reg)
+	reg signed [15:0] x_model_v0;				// Q8.8 from file
+	reg signed [15:0] x_model_v1;
+	reg signed [15:0] x_model_v2;
+	reg signed [15:0] y_model_v0;				
+	reg signed [15:0] y_model_v1;
+	reg signed [15:0] y_model_v2;
+	reg signed [15:0] z_model_v0;				
+	reg signed [15:0] z_model_v1;
+	reg signed [15:0] z_model_v2;
+	reg signed [15:0] x_clip_v0;				// Q8.8
+	reg signed [15:0] x_clip_v1;
+	reg signed [15:0] x_clip_v2;
+	reg signed [15:0] y_clip_v0;
+	reg signed [15:0] y_clip_v1;
+	reg signed [15:0] y_clip_v2;
+	reg signed [15:0] z_clip_v0;
+	reg signed [15:0] z_clip_v1;
+	reg signed [15:0] z_clip_v2;
+	reg signed [15:0] w_clip_v0;
+	reg signed [15:0] w_clip_v1;
+	reg signed [15:0] w_clip_v2;
+	reg signed [15:0] campos_x;					// Q8.8
+	reg signed [15:0] campos_y;
+	reg signed [15:0] campos_z;
+	reg signed [15:0] nx;								// Q8.8 <- Q2.8 from file
+	reg signed [15:0] ny;
+	reg signed [15:0] nz;	
+	reg signed [15:0] light_x;					// Q8.8
+	reg signed [15:0] light_y;
+	reg signed [15:0] light_z;	
+	reg signed [15:0] viewdir_x;				// Q8.8
+	reg signed [15:0] viewdir_y;
+	reg signed [15:0] viewdir_z;	
+	reg [1:0] tri_color;
+	// screenspace
+	reg signed [19:0] x_screen_v0;			// Q20.0
 	reg signed [19:0] x_screen_v1;
 	reg signed [19:0] x_screen_v2;
 	reg signed [19:0] y_screen_v0;
 	reg signed [19:0] y_screen_v1;
 	reg signed [19:0] y_screen_v2;
-	reg signed [21:0] z_screen_v0;			// Q2.20, to match with bar, Q0.16 from file
+	reg signed [21:0] z_screen_v0;			// Q2.20, to match with bar
 	reg signed [21:0] z_screen_v1;
 	reg signed [21:0] z_screen_v2;
 	reg signed [19:0] bboxMin_X;				// Q20.0
 	reg signed [19:0] bboxMin_Y;
 	reg signed [19:0] bboxMax_X;
 	reg signed [19:0] bboxMax_Y;
-	reg [3:0] tri_color;
 	//
 	reg signed [19:0] e0_init;					// Q20.0
 	reg signed [19:0] e1_init;
@@ -201,13 +285,329 @@ module vsfs (
 
 
 
-    
+  //+ for setting wire input to dot4 module
+  always @(*)begin
+  	case (fsm_state)
+  		// backface culling
+  		36: begin
+  			v1_x = nx;
+				v1_y = ny;
+				v1_z = nz;
+				v1_w = 16'sb0000_0000_0000_0000;
+				v2_x = campos_x;
+				v2_y = campos_y;
+				v2_z = campos_z;
+				v2_w = 16'sb0000_0000_0000_0000;
+  		end
+  		// [MVP]*v
+  		38: begin
+  			v1_x = x_model_v0;
+				v1_y = y_model_v0;
+				v1_z = z_model_v0;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_00;
+				v2_y = MVP_01;
+				v2_z = MVP_02;
+				v2_w = MVP_03;
+  		end
+  		39: begin
+  			v1_x = x_model_v0;
+				v1_y = y_model_v0;
+				v1_z = z_model_v0;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_10;
+				v2_y = MVP_11;
+				v2_z = MVP_12;
+				v2_w = MVP_13;
+  		end
+  		40: begin
+  			v1_x = x_model_v0;
+				v1_y = y_model_v0;
+				v1_z = z_model_v0;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_20;
+				v2_y = MVP_21;
+				v2_z = MVP_22;
+				v2_w = MVP_23;
+  		end
+  		41: begin
+  			v1_x = x_model_v0;
+				v1_y = y_model_v0;
+				v1_z = z_model_v0;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_30;
+				v2_y = MVP_31;
+				v2_z = MVP_32;
+				v2_w = MVP_33;
+  		end
+  		42: begin
+  			v1_x = x_model_v1;
+				v1_y = y_model_v1;
+				v1_z = z_model_v1;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_00;
+				v2_y = MVP_01;
+				v2_z = MVP_02;
+				v2_w = MVP_03;
+  		end
+  		43: begin
+  			v1_x = x_model_v1;
+				v1_y = y_model_v1;
+				v1_z = z_model_v1;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_10;
+				v2_y = MVP_11;
+				v2_z = MVP_12;
+				v2_w = MVP_13;
+  		end
+  		44: begin
+  			v1_x = x_model_v1;
+				v1_y = y_model_v1;
+				v1_z = z_model_v1;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_20;
+				v2_y = MVP_21;
+				v2_z = MVP_22;
+				v2_w = MVP_23;
+  		end
+  		45: begin
+  			v1_x = x_model_v1;
+				v1_y = y_model_v1;
+				v1_z = z_model_v1;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_30;
+				v2_y = MVP_31;
+				v2_z = MVP_32;
+				v2_w = MVP_33;
+  		end
+  		46: begin
+  			v1_x = x_model_v2;
+				v1_y = y_model_v2;
+				v1_z = z_model_v2;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_00;
+				v2_y = MVP_01;
+				v2_z = MVP_02;
+				v2_w = MVP_03;
+  		end
+  		47: begin
+  			v1_x = x_model_v2;
+				v1_y = y_model_v2;
+				v1_z = z_model_v2;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_10;
+				v2_y = MVP_11;
+				v2_z = MVP_12;
+				v2_w = MVP_13;
+  		end
+  		48: begin
+  			v1_x = x_model_v2;
+				v1_y = y_model_v2;
+				v1_z = z_model_v2;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_20;
+				v2_y = MVP_21;
+				v2_z = MVP_22;
+				v2_w = MVP_23;
+  		end
+  		49: begin
+  			v1_x = x_model_v2;
+				v1_y = y_model_v2;
+				v1_z = z_model_v2;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = MVP_30;
+				v2_y = MVP_31;
+				v2_z = MVP_32;
+				v2_w = MVP_33;
+  		end
+  		// state 191-206 for [M*VP]
+  		191: begin
+  			v1_x = M_00;
+				v1_y = M_10;
+				v1_z = M_20;
+				v1_w = M_30;
+				v2_x = 16'sh020f;
+				v2_y = 0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		192: begin
+  			v1_x = M_01;
+				v1_y = M_11;
+				v1_z = M_21;
+				v1_w = M_31;
+				v2_x = 16'sh020f;
+				v2_y = 0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		193: begin
+  			v1_x = M_02;
+				v1_y = M_12;
+				v1_z = M_22;
+				v1_w = M_32;
+				v2_x = 16'sh020f;
+				v2_y = 0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		194: begin
+  			v1_x = M_03;
+				v1_y = M_13;
+				v1_z = M_23;
+				v1_w = M_33;
+				v2_x = 16'sh020f;
+				v2_y = 0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		195: begin
+  			v1_x = M_00;
+				v1_y = M_10;
+				v1_z = M_20;
+				v1_w = M_30;
+				v2_x = 0;
+				v2_y = 16'sh02c0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		196: begin
+  			v1_x = M_01;
+				v1_y = M_11;
+				v1_z = M_21;
+				v1_w = M_31;
+				v2_x = 0;
+				v2_y = 16'sh02c0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		197: begin
+  			v1_x = M_02;
+				v1_y = M_12;
+				v1_z = M_22;
+				v1_w = M_32;
+				v2_x = 0;
+				v2_y = 16'sh02c0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		198: begin
+  			v1_x = M_03;
+				v1_y = M_13;
+				v1_z = M_23;
+				v1_w = M_33;
+				v2_x = 0;
+				v2_y = 16'sh02c0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  		199: begin
+  			v1_x = M_00;
+				v1_y = M_10;
+				v1_z = M_20;
+				v1_w = M_30;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shfec9;
+				v2_w = 16'sh1a57;
+  		end
+  		200: begin
+  			v1_x = M_01;
+				v1_y = M_11;
+				v1_z = M_21;
+				v1_w = M_31;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shfec9;
+				v2_w = 16'sh1a57;
+  		end
+  		201: begin
+  			v1_x = M_02;
+				v1_y = M_12;
+				v1_z = M_22;
+				v1_w = M_32;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shfec9;
+				v2_w = 16'sh1a57;
+  		end
+  		202: begin
+  			v1_x = M_03;
+				v1_y = M_13;
+				v1_z = M_23;
+				v1_w = M_33;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shfec9;
+				v2_w = 16'sh1a57;
+  		end
+  		203: begin
+  			v1_x = M_00;
+				v1_y = M_10;
+				v1_z = M_20;
+				v1_w = M_30;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shff01;
+				v2_w = 16'sh27d8;
+  		end
+  		204: begin
+  			v1_x = M_01;
+				v1_y = M_11;
+				v1_z = M_21;
+				v1_w = M_31;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shff01;
+				v2_w = 16'sh27d8;
+  		end
+  		205: begin
+  			v1_x = M_02;
+				v1_y = M_12;
+				v1_z = M_22;
+				v1_w = M_32;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shff01;
+				v2_w = 16'sh27d8;
+  		end
+  		206: begin
+  			v1_x = M_03;
+				v1_y = M_13;
+				v1_z = M_23;
+				v1_w = M_33;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 16'shff01;
+				v2_w = 16'sh27d8;
+  		end
+
+
+  		default: begin
+  			v1_x = 0;
+				v1_y = 0;
+				v1_z = 0;
+				v1_w = 0;
+				v2_x = 0;
+				v2_y = 0;
+				v2_z = 0;
+				v2_w = 0;
+  		end
+  	endcase
+  end
+
+
+
 	always @(posedge clk) begin
     if(reset) begin
     	fsm_state <= 0;
-    	read_delay <= 0;
-    	numread <= 0;
-    	tri_idx <= 0;
+    	//
+    	vsfs_addr <= 0;
+    	vsfs_data_in <= 0;
+    	vsfs_start_read <= 0;
+    	vsfs_start_write <= 0;
+    	vsfs_stop_txn <= 0;
+    	do_swap <= 0;
     	vsfs_running <= 0;
     	// mul, div
 			div_a <= 0;
@@ -219,8 +619,97 @@ module vsfs (
 			mul_a <= 0;
 			mul_b <= 0;
 			mul_start <= 0;
+			dot_start <= 0;
+    	//
+			M_00 <= 0;					// Q8.8
+			M_01 <= 0;
+			M_02 <= 0;
+			M_03 <= 0;
+			M_10 <= 0;					
+			M_11 <= 0;
+			M_12 <= 0;
+			M_13 <= 0;
+			M_20 <= 0;					
+			M_21 <= 0;
+			M_22 <= 0;
+			M_23 <= 0;
+			M_30 <= 0;					
+			M_31 <= 0;
+			M_32 <= 0;
+			M_33 <= 0;
+			MVP_00 <= 0;					// Q8.8
+			MVP_01 <= 0;
+			MVP_02 <= 0;
+			MVP_03 <= 0;
+			MVP_10 <= 0;					
+			MVP_11 <= 0;
+			MVP_12 <= 0;
+			MVP_13 <= 0;
+			MVP_20 <= 0;					
+			MVP_21 <= 0;
+			MVP_22 <= 0;
+			MVP_23 <= 0;
+			MVP_30 <= 0;					
+			MVP_31 <= 0;
+			MVP_32 <= 0;
+			MVP_33 <= 0;
 			//
-			tri_color <= 4'b1010;
+    	read_delay <= 0;
+    	numread <= 0;
+    	tri_idx <= 0;
+    	// tri_xyz[10:0]
+    	//
+    	x_model_v0 <= 0;				// Q8.8 from file
+			x_model_v1 <= 0;
+			x_model_v2 <= 0;
+			y_model_v0 <= 0;				
+			y_model_v1 <= 0;
+			y_model_v2 <= 0;
+			z_model_v0 <= 0;				
+			z_model_v1 <= 0;
+			z_model_v2 <= 0;
+			x_clip_v0 <= 0;
+			x_clip_v1 <= 0;
+			x_clip_v2 <= 0;
+			y_clip_v0 <= 0;
+			y_clip_v1 <= 0;
+			y_clip_v2 <= 0;
+			z_clip_v0 <= 0;
+			z_clip_v1 <= 0;
+			z_clip_v2 <= 0;
+			w_clip_v0 <= 0;
+			w_clip_v1 <= 0;
+			w_clip_v2 <= 0;
+			campos_x <= 0;								
+			campos_y <= 0;
+			campos_z <= 16'sb0010_1000_0000_0000;	
+			nx <= 0;								
+			ny <= 0;
+			nz <= 0;	
+			light_x <= 0;								
+			light_y <= 0;
+			light_z <= 0;	
+			viewdir_x <= 0;								
+			viewdir_y <= 0;
+			viewdir_z <= 0;	
+			tri_color <= 0;
+			x_screen_v0 <= 0;			
+			x_screen_v1 <= 0;
+			x_screen_v2 <= 0;
+			y_screen_v0 <= 0;
+			y_screen_v1 <= 0;
+			y_screen_v2 <= 0;
+			z_screen_v0 <= 0;			
+			z_screen_v1 <= 0;
+			z_screen_v2 <= 0;
+			bboxMin_X <= 0;				
+			bboxMin_Y <= 0;
+			bboxMax_X <= 0;
+			bboxMax_Y <= 0;
+			//
+			e0_init <= 0;					
+			e1_init <= 0;
+			e2_init <= 0;
 			// compute e0_init
 			tmp_ei_mul1 <= 0;
 			tmp_ei_mul2 <= 0;
@@ -239,37 +728,203 @@ module vsfs (
 	    z_bar <= 0;
 	    z_bar_dx <= 0;
 	    z_bar_dy <= 0;
-	    //
+	    //Z_buffer[3:0], C_buffer[3:0]
 	    pixel_y <= 0;
   		pixel_x <= 0;
   		pixel_z <= 0;
   		e0 <= 0;
   		e1 <= 0;
   		e2 <= 0;
-    	//
-    	vsfs_addr <= 0;
-    	vsfs_data_in <= 0;
-    	vsfs_start_read <= 0;
-    	vsfs_start_write <= 0;
-    	vsfs_stop_txn <= 0;
-    	do_swap <= 0;
     end else begin
 			case (fsm_state)
-			// wait for start_vsfs, after clear z on the 1st subframe 
+			///////////////////////////////
+			// 0. perframe, state [150-250]
 				0: begin
 					do_swap <= 0;
 					vsfs_running <= 0;
+					fsm_state <= 150;
+				end
+				//	- set [M]
+				150: begin
+						M_00 <= 16'sb0000_0001_0000_0000;					// Q8.8
+						M_01 <= 0;
+						M_02 <= 0;
+						M_03 <= 0;
+						M_10 <= 0;					
+						M_11 <= 16'sb0000_0001_0000_0000;
+						M_12 <= 0;
+						M_13 <= 0;
+						M_20 <= 0;					
+						M_21 <= 0;
+						M_22 <= 16'sb0000_0001_0000_0000;
+						M_23 <= 0;
+						M_30 <= 0;					
+						M_31 <= 0;
+						M_32 <= 0;
+						M_33 <= 16'sb0000_0001_0000_0000;
+						fsm_state <= 170;
+				end 
+				//	- dir light rot 1 axis
+				170: begin
+						fsm_state <= 190;
+				end 
+
+				//	- set [M*VP]
+				190: begin
+						dot_start <= 1;
+						fsm_state <= 191;
+				end 
+				191: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_00 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 192;
+						end
+				end 
+				192: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_01 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 193;
+						end
+				end 
+				193: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_02 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 194;
+						end
+				end 
+				194: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_03 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 195;
+						end
+				end 
+				195: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_10 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 196;
+						end
+				end 
+				196: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_11 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 197;
+						end
+				end 
+				197: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_12 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 198;
+						end
+				end 
+				198: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_13 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 199;
+						end
+				end 
+				199: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_20 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 200;
+						end
+				end 
+				200: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_21 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 201;
+						end
+				end 
+				201: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_22 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 202;
+						end
+				end 
+				202: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_23 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 203;
+						end
+				end 
+				203: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_30 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 204;
+						end
+				end 
+				204: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_31 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 205;
+						end
+				end 
+				205: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_32 <= dot_result;
+							dot_start <= 1;
+							fsm_state <= 206;
+						end
+				end 
+				206: begin
+						dot_start <= 0;
+						if (dot_done) begin
+							MVP_33 <= dot_result;
+							fsm_state <= 210;
+						end
+				end 
+
+				//	- [M-1]
+				210: begin
+						fsm_state <= 230;
+				end 
+
+				//	- [M-1]*campos
+				230: begin
+						fsm_state <= 240;
+				end 
+
+				//	- [M-1]*lightpos 
+				240: begin
+						fsm_state <= 250;
+				end 
+
+
+			// wait for start_vsfs, after clear z on the 1st subframe 
+				250: begin
 					if (start_vsfs) begin
 						tri_idx <= 0;
 						vsfs_running <= 1;
-						fsm_state <= 1;
-					end
-				end
-
-			///////////////////////////////
-			// 0. user input -> [M][MVP][M]-1, 30 states
-				1: begin
 						fsm_state <= 31;
+					end
 				end 
 			///////////////////////////////
 
@@ -277,17 +932,17 @@ module vsfs (
 				//	- READ tri
 				31: begin
 					if(tri_idx == numtri)begin
-						if (y > 500) begin
+						// wait a few clk before eof to send do_swap
+						if ((y == 524) & (x == 770)) begin
 							do_swap <= 1;
+							vsfs_running <= 0;
 							fsm_state <= 0;
-
-							//fsm_state <= 156;
 						end
 					end else begin
 						if (ram_notbusy) begin
 							vsfs_stop_txn <= 0;
 							vsfs_start_read <= 1;
-							vsfs_addr <= 24'd153600 + {10'b0,tri_idx_addr};
+							vsfs_addr <= 24'd153600 + {9'b0,tri_idx_addr};
 							numread <= 0;
 							read_delay <= 0;
 							fsm_state <= 32;
@@ -307,45 +962,336 @@ module vsfs (
             read_delay <= read_delay + 1;
           end
 				end
-				//   -- read 35 more 4bit
+				//   -- read 43 more 4bit
         33: begin
         	tri_xyz[numread[5:2]][{~numread[1:0],2'b00} +: 4] <= spi_data;
           numread <= numread + 1;
-          if(numread == 35) begin
+          if(numread == 43) begin
           	numread <= 0;
             vsfs_stop_txn <= 1;
             fsm_state <= 34;
           end
-
-          // if(numread == 36)begin
-          //   numread <= 0;
-          //   vsfs_stop_txn <= 1;
-          //   fsm_state <= 34;
-          // end else begin
-          //   tri_xyz[numread[5:2]][{numread[1:0],2'b00} +: 4] <= spi_data;
-          //   numread <= numread + 1;
-          // end
         end
-        //   -- convert bit format to compute e0,bar,z
+        //   -- chk normal -/+
 				34: begin
 					vsfs_stop_txn <= 0;
-					x_screen_v0 <= {4'b0000,tri_xyz[0]};
-					y_screen_v0 <= {4'b0000,tri_xyz[1]};
-					z_screen_v0 <= {2'b00,tri_xyz[2],4'b0000};
-					x_screen_v1 <= {4'b0000,tri_xyz[3]};
-					y_screen_v1 <= {4'b0000,tri_xyz[4]};
-					z_screen_v1 <= {2'b00,tri_xyz[5],4'b0000};
-					x_screen_v2 <= {4'b0000,tri_xyz[6]};
-					y_screen_v2 <= {4'b0000,tri_xyz[7]};
-					z_screen_v2 <= {2'b00,tri_xyz[8],4'b0000};
+					x_model_v0 <= tri_xyz[0];
+					y_model_v0 <= tri_xyz[1];
+					z_model_v0 <= tri_xyz[2];
+					x_model_v1 <= tri_xyz[3];
+					y_model_v1 <= tri_xyz[4];
+					z_model_v1 <= tri_xyz[5];
+					x_model_v2 <= tri_xyz[6];
+					y_model_v2 <= tri_xyz[7];
+					z_model_v2 <= tri_xyz[8];
+					tri_color <= tri_xyz[10][15:14];
+					nz <= (tri_xyz[10][13] == 1'b1)? {6'b1111_11,tri_xyz[10][13:4]} : {6'b0,tri_xyz[10][13:4]};
+					ny <= (tri_xyz[10][3] == 1'b1)? {6'b1111_11,tri_xyz[10][3:0],tri_xyz[9][15:10]} : {6'b0,tri_xyz[10][3:0],tri_xyz[9][15:10]};
+					nx <= (tri_xyz[9][9] == 1'b1)? {6'b1111_11,tri_xyz[9][9:0]} : {6'b0,tri_xyz[9][9:0]};
 					fsm_state <= 35;
 				end
 
 			///////////////////////////////
 			// 2. VS, 40 states
+			//	2.1 backface cullling: viewdir = campos - v1, dot(viewdir,n)
+			//	2.2 [MVP]*v, clip->NDC (div w), NDC->screen
+			//	2.3 dot(light,n)
+			
+			// 2.1 backface cullling
+				//	- viewdir = campos - v1
 				35:begin
+					viewdir_x <= campos_x - x_model_v0;
+					viewdir_y <= campos_y - y_model_v0;
+					viewdir_z <= campos_z - z_model_v0;
+
+					dot_start <= 1;
+					fsm_state <= 36;
+
+					//debug, print out model data
+					// tri_idx <= tri_idx + 1;
+					// fsm_state <= 31;
+				end
+				//	- dot(viewdir,n)
+				36:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						if (dot_result[15] == 1'b1)  begin  	   	  // backfacing
+							tri_idx <= tri_idx + 1;
+							fsm_state <= 31;
+						end else begin
+							fsm_state <= 37;
+						end
+					end
+				end
+				37: begin
+					dot_start <= 1;
+					fsm_state <= 38;
+				end
+
+			// 2.2 [MVP]*v, clip->NDC (div w), NDC->screen
+				// - clip = [MVP] * v
+				38:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						x_clip_v0 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 39;
+					end
+				end
+				39:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						y_clip_v0 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 40;
+					end
+				end
+				40:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						z_clip_v0 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 41;
+					end
+				end
+				41:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						w_clip_v0 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 42;
+					end
+				end
+				42:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						x_clip_v1 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 43;
+					end
+				end
+				43:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						y_clip_v1 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 44;
+					end
+				end
+				44:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						z_clip_v1 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 45;
+					end
+				end
+				45:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						w_clip_v1 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 46;
+					end
+				end
+				46:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						x_clip_v2 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 47;
+					end
+				end
+				47:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						y_clip_v2 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 48;
+					end
+				end
+				48:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						z_clip_v2 <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 49;
+					end
+				end
+				// - clip->NDC (div w), clip.xyz / clip.w
+				49:begin
+					dot_start <= 0;
+					if (dot_done) begin
+						w_clip_v2 <= dot_result;
+						// ndc = clip.xy / clip.w
+						// 		Q8.8->Q16.16 -> Q16.16 = Q16.16/Q16.16 -> Q16.16->Q2.14
+						// 		signed extended[15:0] <= { {8{extend[7]}}, extend[7:0] };
+						div_a <= { {8{x_clip_v0[15]}}, x_clip_v0, 8'b0000_0000};
+						div_b <= { {8{w_clip_v0[15]}}, w_clip_v0, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 50;
+					end
+				end
+				50:begin
+					div_start <= 0;
+					if (div_done) begin
+						x_model_v0 <= div_result[17:2];
+						div_a <= { {8{y_clip_v0[15]}}, y_clip_v0, 8'b0000_0000};
+						div_b <= { {8{w_clip_v0[15]}}, w_clip_v0, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 51;
+					end
+				end
+				51: begin
+					div_start <= 0;
+					if (div_done) begin
+						y_model_v0 <= div_result[17:2];
+						div_a <= { {8{z_clip_v0[15]}}, z_clip_v0, 8'b0000_0000};
+						div_b <= { {8{w_clip_v0[15]}}, w_clip_v0, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 52;
+					end
+				end
+				52: begin
+					div_start <= 0;
+					if (div_done) begin
+						z_model_v0 <= div_result[17:2];
+						div_a <= { {8{x_clip_v1[15]}}, x_clip_v1, 8'b0000_0000};
+						div_b <= { {8{w_clip_v1[15]}}, w_clip_v1, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 53;
+					end
+				end
+				53: begin
+					div_start <= 0;
+					if (div_done) begin
+						x_model_v1 <= div_result[17:2];
+						div_a <= { {8{y_clip_v1[15]}}, y_clip_v1, 8'b0000_0000};
+						div_b <= { {8{w_clip_v1[15]}}, w_clip_v1, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 54;
+					end
+				end
+				54: begin
+					div_start <= 0;
+					if (div_done) begin
+						y_model_v1 <= div_result[17:2];
+						div_a <= { {8{z_clip_v1[15]}}, z_clip_v1, 8'b0000_0000};
+						div_b <= { {8{w_clip_v1[15]}}, w_clip_v1, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 55;
+					end
+				end
+				55: begin
+					div_start <= 0;
+					if (div_done) begin
+						z_model_v1 <= div_result[17:2];
+						div_a <= { {8{x_clip_v2[15]}}, x_clip_v2, 8'b0000_0000};
+						div_b <= { {8{w_clip_v2[15]}}, w_clip_v2, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 56;
+					end
+				end
+				56: begin
+					div_start <= 0;
+					if (div_done) begin
+						x_model_v2 <= div_result[17:2];
+						div_a <= { {8{y_clip_v2[15]}}, y_clip_v2, 8'b0000_0000};
+						div_b <= { {8{w_clip_v2[15]}}, w_clip_v2, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 57;
+					end
+				end
+				57: begin
+					div_start <= 0;
+					if (div_done) begin
+						y_model_v2 <= div_result[17:2];
+						div_a <= { {8{z_clip_v2[15]}}, z_clip_v2, 8'b0000_0000};
+						div_b <= { {8{w_clip_v2[15]}}, w_clip_v2, 8'b0000_0000};
+						div_start <= 1;
+						fsm_state <= 58;
+					end
+				end
+				58: begin
+					div_start <= 0;
+					if (div_done) begin
+						z_model_v2 <= div_result[17:2];
+						fsm_state <= 59;
+					end
+				end
+				// - NDC->screen, screen = [S] * ndc
+				59: begin
+					// screen = [S] * ndc
+					// 		x_ndc * 160 + 160 = x_ndc << 7 + x_ndc << 5 + 160
+					// 				Q2.14 (x_ndc) -> Q9.7 (x_ndc << 7) -> Q11.5
+					//				Q2.14 (x_ndc) -> Q7.9 (x_ndc << 5) -> Q11.5
+					x_model_v0 <= {{2{x_model_v0[15]}}, x_model_v0[15:2]} + 
+												{{4{x_model_v0[15]}}, x_model_v0[15:4]} 
+												+ 16'sb000_1010_0000_00000;										// Q11.5 (160)
+					x_model_v1 <= {{2{x_model_v1[15]}}, x_model_v1[15:2]} + 
+												{{4{x_model_v1[15]}}, x_model_v1[15:4]} 
+												+ 16'sb000_1010_0000_00000;
+					x_model_v2 <= {{2{x_model_v2[15]}}, x_model_v2[15:2]} + 
+												{{4{x_model_v2[15]}}, x_model_v2[15:4]} 
+												+ 16'sb000_1010_0000_00000;
+					//		120 - y * 120. (128-8)
+					//				Q2.14 (y_ndc) -> Q9.7 (y_ndc << 7) -> Q11.5
+					//				Q2.14 (y_ndc) -> Q5.11 (y_ndc << 3) -> Q11.5
+					y_model_v0 <= {{2{y_model_v0[15]}}, y_model_v0[15:2]} -
+												{{6{y_model_v0[15]}}, y_model_v0[15:6]};	
+					y_model_v1 <= {{2{y_model_v1[15]}}, y_model_v1[15:2]} -
+												{{6{y_model_v1[15]}}, y_model_v1[15:6]};	
+					y_model_v2 <= {{2{y_model_v2[15]}}, y_model_v2[15:2]} -
+												{{6{y_model_v2[15]}}, y_model_v2[15:6]};	
+					//		z/2 + 0.5,   
+					//				Q2.14 (z_ndc) -> Q(z_ndc >> 1)
+									// [-1,1] -> [-0.5,0.5] -> [0,1]
+									// 01.xxxx -> 1.999					00.1111 (0.999)
+									// 01.0000 -> 1. 						00.1000 (0.5)
+									// 00.xxxx -> 0,0.99.  			00.0111 (0.499)
+									// //
+									// 11.xxxx -> -0.1,-0.99. 	11.1001 (-0.1)
+									// 11.0000 -> -1 						11.1000 (-0.5)
+									// 10.xxxx                  11.0xxx (-0.5 - -1)
+									// 10.0000 -> -1.999.       11.0000 (-1)
+					z_model_v0 <= {z_model_v0[15], z_model_v0[15:1]} +
+												+ 16'sb00_1000_0000_0000_00;									// Q2.14 (0.5)
+					z_model_v1 <= {z_model_v1[15], z_model_v1[15:1]} +
+												+ 16'sb00_1000_0000_0000_00;
+					z_model_v2 <= {z_model_v2[15], z_model_v2[15:1]} +
+												+ 16'sb00_1000_0000_0000_00;
+					fsm_state <= 60;
+				end
+				60: begin
+					// y = 120 - y, flip y (y=0 at the top, invert of opengl)
+					y_model_v0 <= 16'sb000_0111_1000_00000 - y_model_v0;				// Q11.5 (120)
+					y_model_v1 <= 16'sb000_0111_1000_00000 - y_model_v1;
+					y_model_v2 <= 16'sb000_0111_1000_00000 - y_model_v2;
+					fsm_state <= 61;
+				end
+				61: begin
+					// z_ndc. Q2.14 -> zscreen Q2.20
+					z_screen_v0 <= {2'b00,tri_xyz[2],4'b0000};
+
+					x_screen_v0 <= {9'b0000_0000_0,x_model_v0[15:5]};						// Q20.0 (screen), always positive 
+					x_screen_v1 <= {9'b0000_0000_0,x_model_v1[15:5]};
+					x_screen_v2 <= {9'b0000_0000_0,x_model_v2[15:5]};
+					y_screen_v0 <= {9'b0000_0000_0,y_model_v0[15:5]};
+					y_screen_v1 <= {9'b0000_0000_0,y_model_v1[15:5]};
+					y_screen_v2 <= {9'b0000_0000_0,y_model_v2[15:5]};
+					z_screen_v0 <= {z_model_v0,6'b0};			
+					z_screen_v1 <= {z_model_v1,6'b0};		
+					z_screen_v2 <= {z_model_v2,6'b0};		
+					fsm_state <= 62;
+				end
+				
+
+
+			// 2.3 dot(light,n)
+				62:begin
 					fsm_state <= 74;
 				end
+
 			///////////////////////////////
 
 			// 3. bbox
@@ -368,79 +1314,7 @@ module vsfs (
 					bboxMin_X[1:0] <= 2'b00;
 					bboxMax_X[1:0] <= 2'b00;
 					fsm_state <= 77;
-
-					// DEBUG state 150-155
-					//pixel_y <= bboxMin_Y[9:0];
-					//fsm_state <= 150; 
 				end
-
-
-			//DEBUGGING STATE 150-155: draw bbox
-				// 150: begin
-				// 	if (pixel_y > bboxMax_Y[9:0]) begin
-				// 		tri_idx <= tri_idx + 1;
-				// 		fsm_state <= 31;
-				// 	end else begin
-				// 		pixel_x <= bboxMin_X[9:0];
-				// 		fsm_state <= 151;
-				// 	end
-				// end
-				// 151: begin
-				// 	if (pixel_x > bboxMax_X[9:0]) begin
-				// 		fsm_state <= 155;
-				// 	end else begin
-				// 		C_buffer[0] <= tri_idx[3:0] + 1;
-				// 		C_buffer[1] <= tri_idx[3:0] + 1;
-				// 		C_buffer[2] <= tri_idx[3:0] + 1;
-				// 		C_buffer[3] <= tri_idx[3:0] + 1;
-				// 		numread <= 0;
-				// 		fsm_state <= 152;
-				// 	end
-				// end
-				// 152: begin
-				// 	if (ram_notbusy) begin
-				// 		vsfs_stop_txn <= 0;
-				// 		vsfs_start_write <= 1;
-				// 		// y * 160 + (x/2) + (offset back[0])
-				// 		vsfs_addr <= (evenframe)?{7'b0,pixel_y,7'b0} + {9'b0,pixel_y,5'b0} + {15'b0,pixel_x[9:1]} + 38400:
-        //                         	{7'b0,pixel_y,7'b0} + {9'b0,pixel_y,5'b0} + {15'b0,pixel_x[9:1]};
-				// 		vsfs_data_in <= C_buffer[numread[1:0]];
-				// 		numread <= numread + 1;
-				// 		fsm_state <= 153;
-				// 	end
-				// end
-				// 153: begin
-				// 	vsfs_start_write <= 0;
-				// 	if(spi_data_req)begin
-        //     vsfs_data_in <= C_buffer[numread[1:0]];
-        //     numread <= numread + 1;
-        //     if(numread == 3)begin
-	      //       numread <= 0;
-	      //       vsfs_stop_txn <= 1;
-	      //       fsm_state <= 154;
-	      //     end
-        //   end
-
-        //   // if(numread == 4)begin
-        //   //   numread <= 0;
-        //   //   vsfs_stop_txn <= 1;
-        //   //   fsm_state <= 154;
-        //   // end else if(spi_data_req)begin
-        //   //   vsfs_data_in <= C_buffer[numread[1:0]];
-        //   //   numread <= numread + 1;
-        //   // end
-				// end
-				// 154: begin
-				// 	vsfs_stop_txn <= 0;
-				// 	pixel_x <= pixel_x + 4;
-				// 	fsm_state <= 151;
-				// end
-				// 155: begin
-				// 	pixel_y <= pixel_y + 1;
-				// 	fsm_state <= 150;
-				// end
-
-
 
 			// 4.1 e0_init, e1_init, e2_init 
 				// e0_init = (bboxmin.x - pts[0].x)*(pts[1].y-pts[0].y) + (pts[0].y - bboxmin.y ) * (pts[1].x-pts[0].x);
@@ -887,15 +1761,6 @@ module vsfs (
             vsfs_stop_txn <= 1;
             fsm_state <= 119;
           end
-            
-					// if(numread == 8)begin
-          //   numread <= 0;
-          //   vsfs_stop_txn <= 1;
-          //   fsm_state <= 119;
-          // end else begin
-          //   Z_buffer[numread[2:1]][{numread[0],2'b00} +: 4] <= spi_data;
-          //   numread <= numread + 1;
-          // end
 				end
 				//	- READ x4 B (19 clk)
 				119: begin
@@ -930,15 +1795,6 @@ module vsfs (
             vsfs_stop_txn <= 1;
             fsm_state <= 122;
           end
-
-					// if(numread == 4)begin
-          //   numread <= 0;
-          //   vsfs_stop_txn <= 1;
-          //   fsm_state <= 122;
-          // end else begin
-          //   C_buffer[numread[1:0]] <= spi_data;
-          //   numread <= numread + 1;
-          // end
 				end
 				// x4 pixel
 				//	- if ((e0 > 0) && (e1 > 0) && (e2 > 0)) / e0 += dx, z += z_bar_dx
@@ -1021,15 +1877,6 @@ module vsfs (
 	            fsm_state <= 128;
 	          end
           end
-
-          // if(numread == 8)begin
-          //   numread <= 0;
-          //   vsfs_stop_txn <= 1;
-          //   fsm_state <= 128;
-          // end else if(spi_data_req)begin
-          //   vsfs_data_in <= Z_buffer[numread[2:1]][{numread[0],2'b00} +: 4];
-          //   numread <= numread + 1;
-          // end
 				end
 				// - WRITE x4 B (12 clk) 
 				128: begin
@@ -1054,15 +1901,6 @@ module vsfs (
 	            fsm_state <= 254;
 	          end
           end
-
-          // if(numread == 4)begin
-          //   numread <= 0;
-          //   vsfs_stop_txn <= 1;
-          //   fsm_state <= 254;
-          // end else if(spi_data_req)begin
-          //   vsfs_data_in <= C_buffer[numread[1:0]];
-          //   numread <= numread + 1;
-          // end
 				end
 
 
@@ -1089,16 +1927,21 @@ module vsfs (
 
 
   // debug
-  // assign debug_vsfs_fsm_state = fsm_state;
-  // assign debug_x_screen_v0 = x_screen_v0;
-  // assign debug_x_screen_v1 = x_screen_v1;
-  // assign debug_x_screen_v2 = x_screen_v2;
-  // assign debug_y_screen_v0 = y_screen_v0;
-  // assign debug_y_screen_v1 = y_screen_v1;
-  // assign debug_y_screen_v2 = y_screen_v2;
-  // assign debug_z_screen_v0 = z_screen_v0;
-  // assign debug_z_screen_v1 = z_screen_v1;
-  // assign debug_z_screen_v2 = z_screen_v2;
+  assign debug_vsfs_fsm_state = fsm_state;
+  assign debug_x_model_v0 = dot_result;
+  assign debug_x_model_v1 = x_model_v1;
+  assign debug_x_model_v2 = x_model_v2;
+  assign debug_y_model_v0 = y_model_v0;
+  assign debug_y_model_v1 = y_model_v1;
+  assign debug_y_model_v2 = y_model_v2;
+  assign debug_z_model_v0 = z_model_v0;
+  assign debug_z_model_v1 = z_model_v1;
+  assign debug_z_model_v2 = z_model_v2;
+  assign debug_nx = nx;
+  assign debug_ny = ny;
+  assign debug_nz = nz;
+  assign debug_tri_color = tri_color;
+
 
   
 endmodule
