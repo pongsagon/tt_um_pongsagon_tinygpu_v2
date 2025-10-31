@@ -65,6 +65,10 @@ module tt_um_pongsagon_tinygpu_v2 (
     // output wire [7:0] debug_sub_frame,
     // output reg [21:0] debug_clk,           // >2.11M   
 
+
+
+
+
     input  wire       rst_n    // reset_n - low to reset
   );
 
@@ -203,6 +207,10 @@ module tt_um_pongsagon_tinygpu_v2 (
       // .debug_z_screen_v2(debug_z_screen_v2),
       // .debug_vsfs_fsm_state(debug_vsfs_fsm_state),
 
+
+
+
+
       .ram_notbusy(ram_notbusy)
   );
 
@@ -236,6 +244,7 @@ module tt_um_pongsagon_tinygpu_v2 (
   
 
   // pixel spi data to uo_out
+  // white, pink, cyan, green
   assign uo_out[0] = (setblack_?0:spi_data[3]);
   assign uo_out[1] = (setblack_?0:spi_data[2]);
   assign uo_out[5] = (setblack_?0:spi_data[1]);

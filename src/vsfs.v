@@ -76,20 +76,20 @@ module vsfs (
   	
 
     // things to watch
-    output  wire [15:0] debug_x_model_v0,
-    output  wire [15:0] debug_x_model_v1,
-    output  wire [15:0] debug_x_model_v2,
-    output  wire [15:0] debug_y_model_v0,
-    output  wire [15:0] debug_y_model_v1,
-    output  wire [15:0] debug_y_model_v2,
-    output  wire [15:0] debug_z_model_v0,
-    output  wire [15:0] debug_z_model_v1,
-    output  wire [15:0] debug_z_model_v2,
-    output  wire [15:0] debug_nx,
-    output  wire [15:0] debug_ny,
-    output  wire [15:0] debug_nz,
-    output  wire [1:0] debug_tri_color,
-    output  wire [7:0]  debug_vsfs_fsm_state,
+    // output  wire [15:0] debug_x_model_v0,
+    // output  wire [15:0] debug_x_model_v1,
+    // output  wire [15:0] debug_x_model_v2,
+    // output  wire [15:0] debug_y_model_v0,
+    // output  wire [15:0] debug_y_model_v1,
+    // output  wire [15:0] debug_y_model_v2,
+    // output  wire [15:0] debug_z_model_v0,
+    // output  wire [15:0] debug_z_model_v1,
+    // output  wire [15:0] debug_z_model_v2,
+    // output  wire [15:0] debug_nx,
+    // output  wire [15:0] debug_ny,
+    // output  wire [15:0] debug_nz,
+    // output  wire [1:0] debug_tri_color,
+    // output  wire [7:0]  debug_vsfs_fsm_state,
 
     input		wire 				ram_notbusy
 
@@ -223,19 +223,23 @@ module vsfs (
 	reg signed [15:0] w_clip_v0;
 	reg signed [15:0] w_clip_v1;
 	reg signed [15:0] w_clip_v2;
-	reg signed [15:0] campos_x;					// Q8.8
+	reg signed [15:0] campos_x;					// Q8.8, model space, world space(fix)
 	reg signed [15:0] campos_y;
 	reg signed [15:0] campos_z;
 	reg signed [15:0] nx;								// Q8.8 <- Q2.8 from file
 	reg signed [15:0] ny;
 	reg signed [15:0] nz;	
-	reg signed [15:0] light_x;					// Q8.8
+	reg signed [15:0] light_x;					// Q8.8, world space
 	reg signed [15:0] light_y;
 	reg signed [15:0] light_z;	
-	reg signed [15:0] viewdir_x;				// Q8.8
+	reg signed [15:0] lightM_x;					// Q8.8, model space
+	reg signed [15:0] lightM_y;
+	reg signed [15:0] lightM_z;	
+	reg signed [15:0] viewdir_x;				// Q8.8, model space
 	reg signed [15:0] viewdir_y;
 	reg signed [15:0] viewdir_z;	
 	reg [1:0] tri_color;
+	reg [3:0] shade_color;
 	// screenspace
 	reg signed [19:0] x_screen_v0;			// Q20.0
 	reg signed [19:0] x_screen_v1;
@@ -283,23 +287,104 @@ module vsfs (
   reg [7:0] Z_buffer [3:0];						// Q0.8
   reg [3:0] C_buffer [3:0];						// Q4.0
 
+  wire [7:0] sine_value;
+  reg [8:0] sine_angle;
+	reg [8:0] rotY_angle;							// 0-359
+	reg [8:0] rotY_angle_90;					// for fixCos(i) = fixSin(i + 90)
+	reg signed [15:0] cosTheta;				// Q8.8
+	reg signed [15:0] sinTheta;
+  sine_rom sine_rom1(.angle(sine_angle[6:0]),.value(sine_value));
 
 
-  //+ for setting wire input to dot4 module
+  // for setting wire input to dot4 module
   always @(*)begin
   	case (fsm_state)
+  		// [M-1]*campos
+  		230: begin
+  			v1_x = 0;
+				v1_y = 0;
+				v1_z = 16'sb0010_1000_0000_0000;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = M_00;
+				v2_y = M_01;
+				v2_z = M_02;
+				v2_w = M_03;
+  		end
+  		231: begin
+  			v1_x = 0;
+				v1_y = 0;
+				v1_z = 16'sb0010_1000_0000_0000;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = M_10;
+				v2_y = M_11;
+				v2_z = M_12;
+				v2_w = M_13;
+  		end
+  		232: begin
+  			v1_x = 0;
+				v1_y = 0;
+				v1_z = 16'sb0010_1000_0000_0000;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = M_20;
+				v2_y = M_21;
+				v2_z = M_22;
+				v2_w = M_23;
+  		end
+  		// [M-1]*light
+  		240: begin
+  			v1_x = light_x;
+				v1_y = light_y;
+				v1_z = light_z;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = M_00;
+				v2_y = M_01;
+				v2_z = M_02;
+				v2_w = M_03;
+  		end
+  		241: begin
+  			v1_x = light_x;
+				v1_y = light_y;
+				v1_z = light_z;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = M_10;
+				v2_y = M_11;
+				v2_z = M_12;
+				v2_w = M_13;
+  		end
+  		242: begin
+  			v1_x = light_x;
+				v1_y = light_y;
+				v1_z = light_z;
+				v1_w = 16'sb0000_0001_0000_0000;
+				v2_x = M_20;
+				v2_y = M_21;
+				v2_z = M_22;
+				v2_w = M_23;
+  		end
+
   		// backface culling
   		36: begin
   			v1_x = nx;
 				v1_y = ny;
 				v1_z = nz;
 				v1_w = 16'sb0000_0000_0000_0000;
-				v2_x = campos_x;
-				v2_y = campos_y;
-				v2_z = campos_z;
+				v2_x = viewdir_x;
+				v2_y = viewdir_y;
+				v2_z = viewdir_z;
 				v2_w = 16'sb0000_0000_0000_0000;
   		end
-  		// [MVP]*v
+  		// for dot(light,n)
+			63: begin
+				v1_x = nx;
+				v1_y = ny;
+				v1_z = nz;
+				v1_w = 16'sb0000_0000_0000_0000;
+				v2_x = lightM_x;
+				v2_y = lightM_y;
+				v2_z = lightM_z;
+				v2_w = 16'sb0000_0000_0000_0000;
+			end
+  		// [MVP]*v, state 38-49
   		38: begin
   			v1_x = x_model_v0;
 				v1_y = y_model_v0;
@@ -654,10 +739,16 @@ module vsfs (
 			MVP_32 <= 0;
 			MVP_33 <= 0;
 			//
+			sine_angle <= 0;
+			rotY_angle <= 0;		
+			rotY_angle_90 <= 0;						
+			cosTheta <= 0;				
+			sinTheta <= 0;
+			//
     	read_delay <= 0;
     	numread <= 0;
     	tri_idx <= 0;
-    	// tri_xyz[10:0]
+    	// tri_xyz[10:0]				 
     	//
     	x_model_v0 <= 0;				// Q8.8 from file
 			x_model_v1 <= 0;
@@ -688,11 +779,15 @@ module vsfs (
 			nz <= 0;	
 			light_x <= 0;								
 			light_y <= 0;
-			light_z <= 0;	
+			light_z <= 16'sb0000_0001_0000_0000;		
+			lightM_x <= 0;								
+			lightM_y <= 0;
+			lightM_z <= 0;	
 			viewdir_x <= 0;								
 			viewdir_y <= 0;
 			viewdir_z <= 0;	
 			tri_color <= 0;
+			shade_color <= 0;
 			x_screen_v0 <= 0;			
 			x_screen_v1 <= 0;
 			x_screen_v2 <= 0;
@@ -746,22 +841,130 @@ module vsfs (
 				end
 				//	- set [M]
 				150: begin
-						M_00 <= 16'sb0000_0001_0000_0000;					// Q8.8
+					// auto rot each frame
+					if(rotY_angle > 358)begin
+						rotY_angle <= 0;
+					end else begin
+						rotY_angle <= rotY_angle + 4;
+					end
+					fsm_state <= 151;
+				end
+				151: begin
+					// fixCos(i) = fixSin(i + 90)
+					if(rotY_angle < 270)begin
+						rotY_angle_90 <= rotY_angle + 90;
+					end else begin
+						rotY_angle_90 <= rotY_angle - 270;
+					end
+
+					// sinTheta
+					if(rotY_angle == 90)begin
+						sinTheta <= 16'sb0000_0001_0000_0000;
+						fsm_state <= 155;
+					end else if(rotY_angle == 270) begin
+						sinTheta <= 16'sb1111_1111_0000_0000;
+						fsm_state <= 155;
+					end else begin
+						fsm_state <= 152;
+					end
+				end
+				152: begin
+					if(rotY_angle < 90) begin
+						sine_angle <= rotY_angle;
+					end else if(rotY_angle < 180) begin
+						sine_angle <= 180 - rotY_angle;
+					end else if(rotY_angle < 270) begin
+						sine_angle <= rotY_angle - 180;
+					end else begin
+						sine_angle <= 360 - rotY_angle;
+					end
+					fsm_state <= 153;
+				end
+				153: begin
+					sinTheta <= {8'b0,sine_value};
+					fsm_state <= 154;
+				end
+				154: begin
+					if(rotY_angle >= 180) begin
+						sinTheta <= ~sinTheta + 16'sb0000_0000_0000_0001;	
+					end
+					fsm_state <= 155;
+				end
+				155: begin
+					// cosTheta
+					if(rotY_angle_90 == 90)begin
+						cosTheta <= 16'sb0000_0001_0000_0000;
+						fsm_state <= 159;
+					end else if(rotY_angle_90 == 270) begin
+						cosTheta <= 16'sb1111_1111_0000_0000;
+						fsm_state <= 159;
+					end else begin
+						fsm_state <= 156;
+					end
+				end
+				156: begin
+					if(rotY_angle_90 < 90) begin
+						sine_angle <= rotY_angle_90;
+					end else if(rotY_angle_90 < 180) begin
+						sine_angle <= 180 - rotY_angle_90;
+					end else if(rotY_angle_90 < 270) begin
+						sine_angle <= rotY_angle_90 - 180;
+					end else begin
+						sine_angle <= 360 - rotY_angle_90;
+					end
+
+					fsm_state <= 157;
+				end
+				157: begin
+					cosTheta <= {8'b0,sine_value};
+					fsm_state <= 158;
+				end
+				158: begin
+					if(rotY_angle_90 >= 180) begin
+						cosTheta <= ~cosTheta + 16'sb0000_0000_0000_0001;	
+					end
+					fsm_state <= 159;
+				end
+				159: begin
+					fsm_state <= 169;
+				end
+				169: begin
+						// identity
+						// M_00 <= 16'sb0000_0001_0000_0000;					// Q8.8
+						// M_01 <= 0;
+						// M_02 <= 0;
+						// M_03 <= 0;
+						// M_10 <= 0;					
+						// M_11 <= 16'sb0000_0001_0000_0000;
+						// M_12 <= 0;
+						// M_13 <= 0;
+						// M_20 <= 0;					
+						// M_21 <= 0;
+						// M_22 <= 16'sb0000_0001_0000_0000;
+						// M_23 <= 0;
+						// M_30 <= 0;					
+						// M_31 <= 0;
+						// M_32 <= 0;
+						// M_33 <= 16'sb0000_0001_0000_0000;
+
+						// rotY only
+						M_00 <= cosTheta;					// Q8.8
 						M_01 <= 0;
-						M_02 <= 0;
+						M_02 <= sinTheta;
 						M_03 <= 0;
 						M_10 <= 0;					
 						M_11 <= 16'sb0000_0001_0000_0000;
 						M_12 <= 0;
 						M_13 <= 0;
-						M_20 <= 0;					
+						M_20 <= ~sinTheta + 16'sb0000_0000_0000_0001;			
 						M_21 <= 0;
-						M_22 <= 16'sb0000_0001_0000_0000;
+						M_22 <= cosTheta;
 						M_23 <= 0;
 						M_30 <= 0;					
 						M_31 <= 0;
 						M_32 <= 0;
 						M_33 <= 16'sb0000_0001_0000_0000;
+
 						fsm_state <= 170;
 				end 
 				//	- dir light rot 1 axis
@@ -904,17 +1107,77 @@ module vsfs (
 
 				//	- [M-1]
 				210: begin
+						// rotY only
+						M_00 <= cosTheta;					// Q8.8
+						M_01 <= 0;
+						M_02 <= ~sinTheta + 16'sb0000_0000_0000_0001;		
+						M_03 <= 0;
+						M_10 <= 0;					
+						M_11 <= 16'sb0000_0001_0000_0000;
+						M_12 <= 0;
+						M_13 <= 0;
+						M_20 <= sinTheta;					
+						M_21 <= 0;
+						M_22 <= cosTheta;
+						M_23 <= 0;
+						M_30 <= 0;					
+						M_31 <= 0;
+						M_32 <= 0;
+						M_33 <= 16'sb0000_0001_0000_0000;
+
+						dot_start <= 1;
 						fsm_state <= 230;
 				end 
 
 				//	- [M-1]*campos
 				230: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						campos_x <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 231;
+					end
+				end 
+				231: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						campos_y <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 232;
+					end
+				end 
+				232: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						campos_z <= dot_result;
+						dot_start <= 1;
 						fsm_state <= 240;
+					end
 				end 
 
 				//	- [M-1]*lightpos 
 				240: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						lightM_x <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 241;
+					end
+				end 
+				241: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						lightM_y <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 242;
+					end
+				end 
+				242: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						lightM_z <= dot_result;
 						fsm_state <= 250;
+					end
 				end 
 
 
@@ -1285,11 +1548,35 @@ module vsfs (
 					fsm_state <= 62;
 				end
 				
-
-
 			// 2.3 dot(light,n)
 				62:begin
-					fsm_state <= 74;
+					dot_start <= 1;
+					fsm_state <= 63;
+				end
+				63: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						if (dot_result[9] == 1'b1) begin  	   	  		// backfacing 1x.xxx
+							if (dot_result[8:6] == 3'b100) begin  			// 11.000 -> -1
+								shade_color[2:1] <= 2'b11;
+							end
+							else if (dot_result[9:8] == 2'b10) begin 		// 10.xxx -> -1.xxx
+								shade_color[2:1] <= 2'b11;
+							end
+							else begin
+								shade_color[2:1] <= ~dot_result[7:6];						// 11.xxx -> -0.xxx
+							end
+						end
+						else begin
+							if (dot_result[8:5] == 4'b1000) begin 			// 01.000 -> 1
+								shade_color[2:1] <= 2'b11;
+							end
+							else begin
+								shade_color[2:1] <= dot_result[7:6];							// 0.000 - 0.111
+							end
+						end
+						fsm_state <= 74;
+					end
 				end
 
 			///////////////////////////////
@@ -1804,7 +2091,8 @@ module vsfs (
 					vsfs_stop_txn <= 0;
 					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
 					//if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
-						C_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? tri_idx[3:0]+1 : C_buffer[0]; 
+						//C_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? tri_idx[3:0]+1 : C_buffer[0]; 
+						C_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? shade_color : C_buffer[0]; 
 						Z_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? pixel_z[19:12] : Z_buffer[0]; 
 						//C_buffer[0] <= tri_idx[3:0]+1;
 					end 
@@ -1817,7 +2105,8 @@ module vsfs (
 				123: begin
 					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
 					// if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
-						C_buffer[1] <= (pixel_z[19:12] < Z_buffer[1])? tri_idx[3:0] : C_buffer[1]; 
+						//C_buffer[1] <= (pixel_z[19:12] < Z_buffer[1])? tri_idx[3:0] : C_buffer[1]; 
+						C_buffer[1] <= (pixel_z[19:12] < Z_buffer[1])? shade_color : C_buffer[1]; 
 						Z_buffer[1] <= (pixel_z[19:12] < Z_buffer[1])? pixel_z[19:12] : Z_buffer[1]; 
 						// C_buffer[1] <= tri_idx[3:0]; 
 					end 
@@ -1830,7 +2119,8 @@ module vsfs (
 				124: begin
 					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
 					// if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
-						C_buffer[2] <= (pixel_z[19:12] < Z_buffer[2])? tri_idx[3:0]+1 : C_buffer[2]; 
+						//C_buffer[2] <= (pixel_z[19:12] < Z_buffer[2])? tri_idx[3:0]+1 : C_buffer[2]; 
+						C_buffer[2] <= (pixel_z[19:12] < Z_buffer[2])? shade_color : C_buffer[2]; 
 						Z_buffer[2] <= (pixel_z[19:12] < Z_buffer[2])? pixel_z[19:12] : Z_buffer[2]; 
 						// C_buffer[2] <= tri_idx[3:0]+1;
 					end 
@@ -1843,7 +2133,8 @@ module vsfs (
 				125: begin
 					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
 					// if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
-						C_buffer[3] <= (pixel_z[19:12] < Z_buffer[3])? tri_idx[3:0] : C_buffer[3]; 
+						//C_buffer[3] <= (pixel_z[19:12] < Z_buffer[3])? tri_idx[3:0] : C_buffer[3]; 
+						C_buffer[3] <= (pixel_z[19:12] < Z_buffer[3])? shade_color : C_buffer[3]; 
 						Z_buffer[3] <= (pixel_z[19:12] < Z_buffer[3])? pixel_z[19:12] : Z_buffer[3]; 
 						// C_buffer[3] <= tri_idx[3:0];
 					end 
@@ -1927,20 +2218,20 @@ module vsfs (
 
 
   // debug
-  assign debug_vsfs_fsm_state = fsm_state;
-  assign debug_x_model_v0 = dot_result;
-  assign debug_x_model_v1 = x_model_v1;
-  assign debug_x_model_v2 = x_model_v2;
-  assign debug_y_model_v0 = y_model_v0;
-  assign debug_y_model_v1 = y_model_v1;
-  assign debug_y_model_v2 = y_model_v2;
-  assign debug_z_model_v0 = z_model_v0;
-  assign debug_z_model_v1 = z_model_v1;
-  assign debug_z_model_v2 = z_model_v2;
-  assign debug_nx = nx;
-  assign debug_ny = ny;
-  assign debug_nz = nz;
-  assign debug_tri_color = tri_color;
+  // assign debug_vsfs_fsm_state = fsm_state;
+  // assign debug_x_model_v0 = dot_result;
+  // assign debug_x_model_v1 = x_model_v1;
+  // assign debug_x_model_v2 = x_model_v2;
+  // assign debug_y_model_v0 = y_model_v0;
+  // assign debug_y_model_v1 = y_model_v1;
+  // assign debug_y_model_v2 = y_model_v2;
+  // assign debug_z_model_v0 = z_model_v0;
+  // assign debug_z_model_v1 = z_model_v1;
+  // assign debug_z_model_v2 = z_model_v2;
+  // assign debug_nx = nx;
+  // assign debug_ny = ny;
+  // assign debug_nz = nz;
+  // assign debug_tri_color = tri_color;
 
 
   

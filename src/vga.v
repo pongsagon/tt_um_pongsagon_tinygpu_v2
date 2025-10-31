@@ -23,8 +23,6 @@ module vga(
 	
 	assign x = xc;
 	assign y = yc;
-	//assign newframe = ((xc == 0) && (yc == 1) && (prescaler == 0));
-	//assign endframe = ((xc == 0) && (yc == 480) && (prescaler == 0));
 	
 	always @(posedge clk) begin
 		if (reset) begin
