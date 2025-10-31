@@ -24,6 +24,7 @@ project:
     - "vga.v"
     - "vsfs.v"
     - "spi_flash_controller.v"
+    - "sine_rom.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
@@ -56,7 +57,7 @@ pinout:
   uio[4]: "SD2"
   uio[5]: "SD3"
   uio[6]: "CS1"
-  uio[7]: ""
+  uio[7]: "CS2"
 
 # Do not change!
 yaml_version: 6
