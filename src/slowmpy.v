@@ -87,12 +87,12 @@ module	slowmpy #(
 
 	// almost_done
 	always @(posedge i_clk) begin
-		almost_done <= (!i_reset)&&(o_busy)&&(pre_done);
+		almost_done <= (i_reset)&&(o_busy)&&(pre_done);
 	end
 
 	// aux, o_done, o_busy
 	always @(posedge i_clk) begin
-		if (i_reset) begin
+		if (!i_reset) begin
 			aux    <= 0;
 			o_done <= 0;
 			o_busy <= 0;

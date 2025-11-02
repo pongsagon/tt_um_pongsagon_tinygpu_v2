@@ -44,7 +44,7 @@ module dot4(
     reg signed [15:0] tmp_vs_mul1;
 
     always @(posedge clk) begin
-    	if (reset) begin
+    	if (!reset) begin
     		mul_a <= 0;
 			mul_b <= 0;
 			mul_start <= 0;

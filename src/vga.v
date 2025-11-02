@@ -25,7 +25,7 @@ module vga(
 	assign y = yc;
 	
 	always @(posedge clk) begin
-		if (reset) begin
+		if (!reset) begin
 			xc <= 0;
 			yc <= 0;
 		end

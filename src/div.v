@@ -121,7 +121,7 @@ module div #(
                 end
             end
         endcase
-        if (rst) begin
+        if (!rst) begin
             state <= IDLE;
             busy <= 0;
             done <= 0;

@@ -21,7 +21,7 @@
     - 0:      front, FLASH tri
     - 38400:  back
     - 76800:  z
-    - 153600: tri
+    - 153600: tri (<1024)
 
   - ui_in[2:0]: latency, 
   - ui_in[6:4]: gamepad pmod
@@ -80,12 +80,12 @@ module tt_um_pongsagon_tinygpu_v2 (
   wire [9:0] x;
   wire [9:0] y;
   wire blank;
-  assign setblack = ((x > 320) | (y > 239));
-  assign setblack_ = ((x > 319) | (y > 239));
+  assign setblack = ((x > 320) || (y > 239));
+  assign setblack_ = ((x > 319) || (y > 239));
 
   vga v(
       .clk(clk),
-      .reset(!rst_n),
+      .reset(rst_n),
       .HS(HS),
       .VS(VS),
       .blank(blank),
@@ -159,27 +159,52 @@ module tt_um_pongsagon_tinygpu_v2 (
   wire eof;               // stop access mem to display image
   wire eol_e;
   wire eof_e;
-  assign eol = (y < 239) & (x > (799-SLOWEST_STATE)) & (sub_frame > 1);
-  assign eof = (y == 524) & (x > (799-SLOWEST_STATE));    // true(725,524)->, false(0,0)
-  assign eol_e = (y < 239) & (x > 782) & (sub_frame > 1);
-  assign eof_e = (y == 524) & (x > 782);    
-  // mux between VSFS & display to ram
+  assign eol = (y < 239) && (x > (799-SLOWEST_STATE)) && (sub_frame > 1);
+  assign eof = (y == 524) && (x > (799-SLOWEST_STATE));    // true(725,524)->, false(0,0)
+  assign eol_e = (y < 239) && (x > 782) && (sub_frame > 1);
+  assign eof_e = (y == 524) && (x > 782);    
+  // mux between VSFS and display to ram
   wire ram_notbusy;
   wire ram_notbusy_end;
-  assign ram_notbusy = ((sub_frame > 1) & setblack & !eol & !eof) | 
-                        ((sub_frame < 2) & (!eof) & (y > 431)) ;
-  assign ram_notbusy_end = ((sub_frame > 1) & setblack & !eol_e & !eof_e) | 
-                          ((sub_frame < 2) & (!eof_e) & (y > 431)) ;
-  assign spi_addr =         (ram_notbusy_end & vsfs_running)? vsfs_addr : display_addr;
-  assign spi_data_in =      (ram_notbusy_end & vsfs_running)? vsfs_data_in : display_data_in;
-  assign spi_start_read =   (ram_notbusy_end & vsfs_running)? vsfs_start_read : display_start_read;
-  assign spi_start_write =  (ram_notbusy_end & vsfs_running)? vsfs_start_write : display_start_write;
-  assign spi_stop_txn =     (ram_notbusy_end & vsfs_running)? vsfs_stop_txn : display_stop_txn;
+  assign ram_notbusy = ((sub_frame > 1) && setblack && !eol && !eof) || 
+                        ((sub_frame < 2) && (!eof) && (y > 431)) ;
+  assign ram_notbusy_end = ((sub_frame > 1) && setblack && !eol_e && !eof_e) || 
+                          ((sub_frame < 2) && (!eof_e) && (y > 431)) ;
+  assign spi_addr =         (ram_notbusy_end && vsfs_running)? vsfs_addr : display_addr;
+  assign spi_data_in =      (ram_notbusy_end && vsfs_running)? vsfs_data_in : display_data_in;
+  assign spi_start_read =   (ram_notbusy_end && vsfs_running)? vsfs_start_read : display_start_read;
+  assign spi_start_write =  (ram_notbusy_end && vsfs_running)? vsfs_start_write : display_start_write;
+  assign spi_stop_txn =     (ram_notbusy_end && vsfs_running)? vsfs_stop_txn : display_stop_txn;
 
+
+  wire inp_select, inp_start, inp_l, inp_r, gamepad_present;
+  wire [7:0] gamepad_input;
+  gamepad_pmod_single driver (
+      // Inputs:
+      .rst_n(rst_n),
+      .clk(clk),
+      .pmod_data(ui_in[6]),
+      .pmod_clk(ui_in[5]),
+      .pmod_latch(ui_in[4]),
+      // Outputs:
+      .b(gamepad_input[5]),
+      .y(gamepad_input[7]),
+      .select(inp_select),
+      .start(inp_start),
+      .up(gamepad_input[0]),
+      .down(gamepad_input[1]),
+      .left(gamepad_input[3]),
+      .right(gamepad_input[2]),
+      .a(gamepad_input[4]),
+      .x(gamepad_input[6]),
+      .l(inp_l),
+      .r(inp_r),
+      .is_present(gamepad_present)
+  );
 
   vsfs _vsfs(
       .clk(clk),
-      .reset(!rst_n),
+      .reset(rst_n),
       .vsfs_addr(vsfs_addr),
       .vsfs_data_in(vsfs_data_in),
       .vsfs_start_read(vsfs_start_read),
@@ -194,6 +219,7 @@ module tt_um_pongsagon_tinygpu_v2 (
       .y(y),
       .numtri(numtri),
       .evenframe(evenframe),
+      .gamepad_input(gamepad_input),
       
       //
       // .debug_x_screen_v0(debug_x_screen_v0),
@@ -242,17 +268,18 @@ module tt_um_pongsagon_tinygpu_v2 (
   );
 
   
+  wire [5:0] color;
+  color_palette _color(.spi_data(spi_data),.color(color));
 
   // pixel spi data to uo_out
-  // white, pink, cyan, green
-  assign uo_out[0] = (setblack_?0:spi_data[3]);
-  assign uo_out[1] = (setblack_?0:spi_data[2]);
-  assign uo_out[5] = (setblack_?0:spi_data[1]);
-  assign uo_out[2] = (setblack_?0:spi_data[0]);
+  assign uo_out[0] = (setblack_?0:color[5]); //R1
+  assign uo_out[1] = (setblack_?0:color[3]); //G1
+  assign uo_out[2] = (setblack_?0:color[1]); //B1
   assign uo_out[3] = VS;
+  assign uo_out[4] = (setblack_?0:color[4]); //R0
+  assign uo_out[5] = (setblack_?0:color[2]); //G0
+  assign uo_out[6] = (setblack_?0:color[0]); //B0
   assign uo_out[7] = HS;
-  assign uo_out[4] = (setblack_?0:spi_data[3]);
-  assign uo_out[6] = (setblack_?0:spi_data[0]);
   
 
   always @(posedge clk) begin
@@ -282,7 +309,7 @@ module tt_um_pongsagon_tinygpu_v2 (
       case (fsm_state)
       // 0. enter Quad mode (fsm 0-1)
         0: begin
-          if ((y == 524) & (x == 775)) begin 
+          if ((y == 524) && (x == 775)) begin 
             spi_enter_quadmode <= 1;
             fsm_state <= 1;
           end
@@ -384,7 +411,7 @@ module tt_um_pongsagon_tinygpu_v2 (
           numread <= numread + 1;
           fsm_state <= 10;
         end
-        //   -- wait & write 2 byte
+        //   -- wait and write 2 byte
         10: begin
           display_start_write <= 0;
           if (spi_data_req) begin
@@ -401,7 +428,7 @@ module tt_um_pongsagon_tinygpu_v2 (
         end
 
       // 2. RAM front -> vga uo_out[] + clear Back (fsm 11 - 16)
-        //  - wait for eof last line y & x 16 clk ahead to read the first pixel 
+        //  - wait for eof last line y and x 16 clk ahead to read the first pixel 
         11: begin
           display_stop_txn <= 0;
           start_vsfs <= 0;
@@ -410,7 +437,7 @@ module tt_um_pongsagon_tinygpu_v2 (
             evenframe <= !evenframe;
             sub_frame <= 0;
           end
-          else if ((y == 524) & (x == 783)) begin     //mark1, eof
+          else if ((y == 524) && (x == 783)) begin     //mark1, eof
             spi_select_ROM <= 0;
             display_start_read <= 1;
             display_addr <= (evenframe)?0:38400;
@@ -460,7 +487,7 @@ module tt_um_pongsagon_tinygpu_v2 (
             numread <= numread + 1;
             fsm_state <= 15;
         end
-        // - wait & clear back 1 line
+        // - wait and clear back 1 line
         15: begin
           display_start_write <= 0;
           if (spi_data_req) begin

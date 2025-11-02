@@ -1,32 +1,45 @@
 
 /* Matt pongsagon
 
-  - addr Flash & RAM front start at 0
+  - addr Flash and RAM front start at 0
   - addr RAM back start at 38400 (320x240=76800/2, 2pixel:1byte)
   - addr RAM z start at 76800 (1pixel:1byte)
   	- front 4bit, back 4bit, z 8bit
 		- cal z in Q2.20 save in Q0.8 [0,1]
   - addr Tri start at 153600
 
-  color
+	gamepad_input 8 bit
+		0,1: +-rotX
+		2,3: +-rotY
+		4,5: +-Tz
+		6,7: +-rotY light
+
+  color mode 1
   	0: black
   	1: blue
   	2: dark green
 		15:
+
+	color mode 2
+		0: white
+		1: cyan
+		2: magenta
+		3: yellow
  
   VSFS
-		//0. perframe, state [150-250]
+  	// free state [130-139, 2-30]
+		0. perframe, state [140-250], quota 800x430 = 340,000 clk
 			- Tz, rotx2 -> [M] ([Tz*Rx*Ry]) // cos table, set premul mat manually 
 			- dir light rot 1axis -> update formula
 			- [M]*[VP] 			// no cam fix [VP]
 			- [M]-1 ([Ryt*Rxt*Tz-1]) // override [M], for light-world, campos-world -> model 
 			- [M-1]*campos 
-			- [M-1]*lightpos 
+			- [M-1]*lightdir
 
     1. for each tri, state [31-129, 254,255]
     	- READ tri (pos.xyz x3 Q8.8, face normal Q2.8 x3, color 2bit)
 
-    //2. VS
+    2. VS
 			- x1: backface culling (view-model dot faceNormal-model)
 			- x3: [MVP]*v, clip->NDC (div), NDC->screen
 			- x1: light-model dot faceNormal-model
@@ -72,7 +85,8 @@ module vsfs (
   	input		wire [9:0]	numtri,
   	input   wire 				evenframe,
 
-  	//+ gamepad input
+  	// gamepad input
+  	input 	wire [7:0]  gamepad_input,
   	
 
     // things to watch
@@ -94,7 +108,7 @@ module vsfs (
     input		wire 				ram_notbusy
 
   );
-    
+
 
   // used by div w
 	reg signed [31:0] div_a;  
@@ -229,9 +243,12 @@ module vsfs (
 	reg signed [15:0] nx;								// Q8.8 <- Q2.8 from file
 	reg signed [15:0] ny;
 	reg signed [15:0] nz;	
-	reg signed [15:0] light_x;					// Q8.8, world space
+	reg signed [15:0] light_x;					// Q8.8, init light
 	reg signed [15:0] light_y;
 	reg signed [15:0] light_z;	
+	reg signed [15:0] lightW_x;					// Q8.8, world space
+	reg signed [15:0] lightW_y;
+	reg signed [15:0] lightW_z;	
 	reg signed [15:0] lightM_x;					// Q8.8, model space
 	reg signed [15:0] lightM_y;
 	reg signed [15:0] lightM_z;	
@@ -263,23 +280,23 @@ module vsfs (
   reg signed [19:0] tmp_ei_mul2;
   // bar_iy, bar_iz, denom
   reg signed [21:0] denom;						// Q2.20  [-1,0.999]
-  reg signed [21:0] bar_ix;						// Q2.20
+  reg signed [21:0] bar_ix;						// Q6.16, not using Q2.20 cause data overflow [-1,0.999]
   reg signed [21:0] bar_ix_dx;
   reg signed [21:0] bar_ix_dy;
-  reg signed [21:0] bar_iy;						// Q2.20
+  reg signed [21:0] bar_iy;						// Q6.16
   reg signed [21:0] bar_iy_dx;
   reg signed [21:0] bar_iy_dy;				
   reg signed [21:0] bar_iz;
   reg signed [21:0] bar_iz_dx;
   reg signed [21:0] bar_iz_dy;
   // bar interpolate z
-  reg signed [21:0] z_bar;						// Q2.20
+  reg signed [21:0] z_bar;						// Q6.16
   reg signed [21:0] z_bar_dx;
   reg signed [21:0] z_bar_dy;
   // in for loop
   reg [9:0] pixel_y;									// Q10.0
   reg [9:0] pixel_x;
-  reg signed [21:0] pixel_z;					// Q2.20
+  reg signed [21:0] pixel_z;					// Q6.16
   reg signed [19:0] e0;
   reg signed [19:0] e1;
   reg signed [19:0] e2;
@@ -287,12 +304,32 @@ module vsfs (
   reg [7:0] Z_buffer [3:0];						// Q0.8
   reg [3:0] C_buffer [3:0];						// Q4.0
 
+  // from gamepad
+  reg manualRot;										// 0: do autoRot, 1: manual
+	reg [8:0] rotY_angle;							// 0-359 
+  reg [8:0] rotY_angle_90;					// for fixCos(i) = fixSin(i + 90)
+  reg [8:0] rotX_angle;							
+  reg [8:0] rotX_angle_90;
+  reg signed [7:0] translate_z;			// [-127,127]
+  reg [8:0] rotY_light;							
+  reg [8:0] rotY_light_90;
+
+  // to compute [M],[M-1]
   wire [7:0] sine_value;
   reg [8:0] sine_angle;
-	reg [8:0] rotY_angle;							// 0-359
-	reg [8:0] rotY_angle_90;					// for fixCos(i) = fixSin(i + 90)
-	reg signed [15:0] cosTheta;				// Q8.8
+	reg signed [15:0] cosTheta;						// Q8.8, [M] use Q8.8, may reduce to Q2.8 to save space
 	reg signed [15:0] sinTheta;
+	reg signed [15:0] cosPhi;							
+	reg signed [15:0] sinPhi;
+	reg signed [15:0] cosLight;							
+	reg signed [15:0] sinLight;
+	reg signed [15:0] cosTheta_sinPhi;		// Q8.8
+	reg signed [15:0] sinTheta_cosPhi;
+	reg signed [15:0] cosTheta_cosPhi;		
+	reg signed [15:0] sinTheta_sinPhi;
+	reg signed [15:0] sinTheta_Tz;				
+	reg signed [15:0] cosTheta_sinPhi_Tz;
+	reg signed [15:0] cosTheta_cosPhi_Tz;
   sine_rom sine_rom1(.angle(sine_angle[6:0]),.value(sine_value));
 
 
@@ -303,7 +340,7 @@ module vsfs (
   		230: begin
   			v1_x = 0;
 				v1_y = 0;
-				v1_z = 16'sb0010_1000_0000_0000;
+				v1_z = 16'sb0010_1000_0000_0000;			// campos in world, fix
 				v1_w = 16'sb0000_0001_0000_0000;
 				v2_x = M_00;
 				v2_y = M_01;
@@ -332,30 +369,30 @@ module vsfs (
   		end
   		// [M-1]*light
   		240: begin
-  			v1_x = light_x;
-				v1_y = light_y;
-				v1_z = light_z;
-				v1_w = 16'sb0000_0001_0000_0000;
+  			v1_x = lightW_x;
+				v1_y = lightW_y;
+				v1_z = lightW_z;
+				v1_w = 16'sb0000_0000_0000_0000;
 				v2_x = M_00;
 				v2_y = M_01;
 				v2_z = M_02;
 				v2_w = M_03;
   		end
   		241: begin
-  			v1_x = light_x;
-				v1_y = light_y;
-				v1_z = light_z;
-				v1_w = 16'sb0000_0001_0000_0000;
+  			v1_x = lightW_x;
+				v1_y = lightW_y;
+				v1_z = lightW_z;
+				v1_w = 16'sb0000_0000_0000_0000;
 				v2_x = M_10;
 				v2_y = M_11;
 				v2_z = M_12;
 				v2_w = M_13;
   		end
   		242: begin
-  			v1_x = light_x;
-				v1_y = light_y;
-				v1_z = light_z;
-				v1_w = 16'sb0000_0001_0000_0000;
+  			v1_x = lightW_x;
+				v1_y = lightW_y;
+				v1_z = lightW_z;
+				v1_w = 16'sb0000_0000_0000_0000;
 				v2_x = M_20;
 				v2_y = M_21;
 				v2_z = M_22;
@@ -505,7 +542,29 @@ module vsfs (
 				v2_z = MVP_32;
 				v2_w = MVP_33;
   		end
-  		// state 191-206 for [M*VP]
+  		// state 177-178 , rot light world
+  		177: begin
+  			v1_x = light_x;
+				v1_y = light_y;
+				v1_z = light_z;
+				v1_w = 16'sb0;
+				v2_x = cosLight;
+				v2_y = 16'sb0;
+				v2_z = sinLight;
+				v2_w = 16'sb0;
+  		end
+  		178: begin
+  			v1_x = light_x;
+				v1_y = light_y;
+				v1_z = light_z;
+				v1_w = 16'sb0;
+				v2_x = ~sinLight + 16'sb0000_0000_0000_0001;	
+				v2_y = 16'sb0;
+				v2_z = cosLight;
+				v2_w = 16'sb0;
+  		end
+
+  		// state 191-206 for [M*VP], [VP] fix
   		191: begin
   			v1_x = M_00;
 				v1_y = M_10;
@@ -684,7 +743,7 @@ module vsfs (
 
 
 	always @(posedge clk) begin
-    if(reset) begin
+    if(!reset) begin
     	fsm_state <= 0;
     	//
     	vsfs_addr <= 0;
@@ -739,11 +798,28 @@ module vsfs (
 			MVP_32 <= 0;
 			MVP_33 <= 0;
 			//
+			manualRot <= 0;
 			sine_angle <= 0;
 			rotY_angle <= 0;		
-			rotY_angle_90 <= 0;						
+			rotY_angle_90 <= 0;	
+			rotX_angle <= 0;		
+			rotX_angle_90 <= 0;		
+			rotY_light <= 0;		
+			rotY_light_90 <= 0;	
+			translate_z <= 0;				
 			cosTheta <= 0;				
 			sinTheta <= 0;
+			cosPhi <= 0;							
+			sinPhi <= 0;
+			cosLight <= 0;							
+			sinLight <= 0;
+			cosTheta_sinPhi <= 0;		// Q8.8
+			sinTheta_cosPhi <= 0;
+			cosTheta_cosPhi <= 0;		
+			sinTheta_sinPhi <= 0;
+			sinTheta_Tz <= 0;				
+			cosTheta_sinPhi_Tz <= 0;
+			cosTheta_cosPhi_Tz <= 0;
 			//
     	read_delay <= 0;
     	numread <= 0;
@@ -773,15 +849,21 @@ module vsfs (
 			w_clip_v2 <= 0;
 			campos_x <= 0;								
 			campos_y <= 0;
-			campos_z <= 16'sb0010_1000_0000_0000;	
+			campos_z <= 16'sb0010_1000_0000_0000;	// cam in model, init to cam in world
 			nx <= 0;								
 			ny <= 0;
 			nz <= 0;	
-			light_x <= 0;								
-			light_y <= 0;
-			light_z <= 16'sb0000_0001_0000_0000;		
+			//light_x <= 16'sb0000_0000_1011_0101;	// light in world, init to (0.707,0.707,0)
+			//light_y <= 16'sb0000_0000_1011_0101;	
+			//light_z <= 16'sb0000_0000_0000_0000;
+			light_x <= 16'sb0000_0000_0000_0000;	// light in world, init to (0,0,1)
+			light_y <= 16'sb0000_0000_0000_0000;	
+			light_z <= 16'sb0000_0001_0000_0000;
+			lightW_x <= 0;	
+			lightW_y <= 0;	
+			lightW_z <= 0;									
 			lightM_x <= 0;								
-			lightM_y <= 0;
+			lightM_y <= 0;		
 			lightM_z <= 0;	
 			viewdir_x <= 0;								
 			viewdir_y <= 0;
@@ -833,31 +915,182 @@ module vsfs (
     end else begin
 			case (fsm_state)
 			///////////////////////////////
-			// 0. perframe, state [150-250]
+			// 0. perframe, state [140-250]
 				0: begin
 					do_swap <= 0;
 					vsfs_running <= 0;
-					fsm_state <= 150;
-				end
-				//	- set [M]
-				150: begin
-					// auto rot each frame
-					if(rotY_angle > 358)begin
-						rotY_angle <= 0;
-					end else begin
-						rotY_angle <= rotY_angle + 4;
+
+					// enable manualRot
+					if ((manualRot == 0) && (gamepad_input != 0)) begin
+						manualRot <= 1;
 					end
-					fsm_state <= 151;
+					fsm_state <= 140;
 				end
-				151: begin
-					// fixCos(i) = fixSin(i + 90)
+				1: begin
+					// debug black hole state,
+					fsm_state <= 1;
+				end
+
+				//	- set [M]
+				140: begin
+					// -- set angle from input, manual/auto
+					if(manualRot == 1) begin
+						// rotX +-
+						if(gamepad_input[0] == 1)begin
+							if(rotX_angle > 355)begin
+								rotX_angle <= 0;
+							end else begin
+								rotX_angle <= rotX_angle + 4;
+							end
+						end else if(gamepad_input[1] == 1)begin
+							if(rotX_angle == 0)begin
+								rotX_angle <= 356;
+							end else begin
+								rotX_angle <= rotX_angle - 4;
+							end
+						end
+						// rotY
+						if(gamepad_input[2] == 1)begin
+							if(rotY_angle > 355)begin
+								rotY_angle <= 0;
+							end else begin
+								rotY_angle <= rotY_angle + 4;
+							end
+						end else if(gamepad_input[3] == 1)begin
+							if(rotY_angle == 0)begin
+								rotY_angle <= 356;
+							end else begin
+								rotY_angle <= rotY_angle - 4;
+							end
+						end
+						// tran Z
+						if(gamepad_input[4] == 1)begin
+							if(translate_z > 120)begin
+								translate_z <= 120;
+							end else begin
+								translate_z <= translate_z + 2;
+							end
+						end else if(gamepad_input[5] == 1)begin
+							if(translate_z < -120)begin
+								translate_z <= -120;
+							end else begin
+								translate_z <= translate_z - 2;
+							end
+						end
+						// rotLight
+						if(gamepad_input[6] == 1)begin
+							if(rotY_light > 355)begin
+								rotY_light <= 0;
+							end else begin
+								rotY_light <= rotY_light + 4;
+							end
+						end else if(gamepad_input[7] == 1)begin
+							if(rotY_light == 0)begin
+								rotY_light <= 356;
+							end else begin
+								rotY_light <= rotY_light - 4;
+							end
+						end
+					end else begin
+						if(rotY_angle > 355)begin
+							rotY_angle <= 0;
+						end else begin
+							rotY_angle <= rotY_angle + 4;
+						end
+					end	
+					fsm_state <= 141;
+				end
+				141: begin
+					// -- fixCos(i) = fixSin(i + 90)
 					if(rotY_angle < 270)begin
 						rotY_angle_90 <= rotY_angle + 90;
 					end else begin
 						rotY_angle_90 <= rotY_angle - 270;
 					end
+					if(rotX_angle < 270)begin
+						rotX_angle_90 <= rotX_angle + 90;
+					end else begin
+						rotX_angle_90 <= rotX_angle - 270;
+					end
+					if(rotY_light < 270)begin
+						rotY_light_90 <= rotY_light + 90;
+					end else begin
+						rotY_light_90 <= rotY_light - 270;
+					end
+					fsm_state <= 142;
+				end
+				142: begin
+					// -- sinPhi
+					if(rotX_angle == 90)begin
+						sinPhi <= 16'sb0000_0001_0000_0000;
+						fsm_state <= 146;
+					end else if(rotX_angle == 270) begin
+						sinPhi <= 16'sb1111_1111_0000_0000;
+						fsm_state <= 146;
+					end else begin
+						fsm_state <= 143;
+					end
+				end
+				143: begin
+					if(rotX_angle < 90) begin
+						sine_angle <= rotX_angle;
+					end else if(rotX_angle < 180) begin
+						sine_angle <= 180 - rotX_angle;
+					end else if(rotX_angle < 270) begin
+						sine_angle <= rotX_angle - 180;
+					end else begin
+						sine_angle <= 360 - rotX_angle;
+					end
+					fsm_state <= 144;
+				end
+				144: begin
+					sinPhi <= {8'b0,sine_value};
+					fsm_state <= 145;
+				end
+				145: begin
+					if(rotX_angle >= 180) begin
+						sinPhi <= ~sinPhi + 16'sb0000_0000_0000_0001;	
+					end
+					fsm_state <= 146;
+				end
+				146: begin
+					// -- cosPhi
+					if(rotX_angle_90 == 90)begin
+						cosPhi <= 16'sb0000_0001_0000_0000;
+						fsm_state <= 151;
+					end else if(rotX_angle_90 == 270) begin
+						cosPhi <= 16'sb1111_1111_0000_0000;
+						fsm_state <= 151;
+					end else begin
+						fsm_state <= 147;
+					end
+				end
+				147: begin
+					if(rotX_angle_90 < 90) begin
+						sine_angle <= rotX_angle_90;
+					end else if(rotX_angle_90 < 180) begin
+						sine_angle <= 180 - rotX_angle_90;
+					end else if(rotX_angle_90 < 270) begin
+						sine_angle <= rotX_angle_90 - 180;
+					end else begin
+						sine_angle <= 360 - rotX_angle_90;
+					end
 
-					// sinTheta
+					fsm_state <= 148;
+				end
+				148: begin
+					cosPhi <= {8'b0,sine_value};
+					fsm_state <= 149;
+				end
+				149: begin
+					if(rotX_angle_90 >= 180) begin
+						cosPhi <= ~cosPhi + 16'sb0000_0000_0000_0001;	
+					end
+					fsm_state <= 151;
+				end
+				// free state 150
+				151: begin
+					// -- sinTheta
 					if(rotY_angle == 90)begin
 						sinTheta <= 16'sb0000_0001_0000_0000;
 						fsm_state <= 155;
@@ -891,7 +1124,7 @@ module vsfs (
 					fsm_state <= 155;
 				end
 				155: begin
-					// cosTheta
+					// -- cosTheta
 					if(rotY_angle_90 == 90)begin
 						cosTheta <= 16'sb0000_0001_0000_0000;
 						fsm_state <= 159;
@@ -925,53 +1158,195 @@ module vsfs (
 					end
 					fsm_state <= 159;
 				end
-				159: begin
-					fsm_state <= 169;
-				end
-				169: begin
-						// identity
-						// M_00 <= 16'sb0000_0001_0000_0000;					// Q8.8
-						// M_01 <= 0;
-						// M_02 <= 0;
-						// M_03 <= 0;
-						// M_10 <= 0;					
-						// M_11 <= 16'sb0000_0001_0000_0000;
-						// M_12 <= 0;
-						// M_13 <= 0;
-						// M_20 <= 0;					
-						// M_21 <= 0;
-						// M_22 <= 16'sb0000_0001_0000_0000;
-						// M_23 <= 0;
-						// M_30 <= 0;					
-						// M_31 <= 0;
-						// M_32 <= 0;
-						// M_33 <= 16'sb0000_0001_0000_0000;
 
-						// rotY only
+				// -- 7 mul sin.cos.t
+				//		- Q8.8 -> Q8.14, Q8.14 x Q8.14 = Q16.28 -> Q8.8
+				//		- Tz: Q8.0 -> Q8.14
+				159: begin
+					mul_a <= {cosTheta,6'b0};				// Q8.8 -> Q8.14
+					mul_b <= {sinPhi,6'b0};			
+					mul_start <= 1;
+					fsm_state <= 160;
+				end
+				160: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						cosTheta_sinPhi <= mul_result[35:20];							
+						mul_a <= {sinTheta,6'b0};		
+						mul_b <= {cosPhi,6'b0};
+						mul_start <= 1;
+						fsm_state <= 161;
+					end
+				end
+				161: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						sinTheta_cosPhi <= mul_result[35:20];							
+						mul_a <= {cosTheta,6'b0};		
+						mul_b <= {cosPhi,6'b0};	
+						mul_start <= 1;
+						fsm_state <= 162;
+					end
+				end
+				162: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						cosTheta_cosPhi <= mul_result[35:20];							
+						mul_a <= {sinTheta,6'b0};		
+						mul_b <= {sinPhi,6'b0};	
+						mul_start <= 1;
+						fsm_state <= 163;
+					end
+				end
+				163: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						sinTheta_sinPhi <= mul_result[35:20];	
+						mul_a <= {sinTheta,6'b0};		
+						mul_b <= {translate_z,14'b0};						// Tz: Q8.0 -> Q8.14
+						mul_start <= 1;
+						fsm_state <= 164;
+					end
+				end
+				164: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						sinTheta_Tz <= mul_result[35:20];	
+						mul_a <= {cosTheta_sinPhi,6'b0};		
+						mul_b <= {translate_z,14'b0};						
+						mul_start <= 1;
+						fsm_state <= 165;
+					end
+				end
+				165: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						cosTheta_sinPhi_Tz <= mul_result[35:20];	
+						mul_a <= {cosTheta_cosPhi,6'b0};		
+						mul_b <= {translate_z,14'b0};						
+						mul_start <= 1;
+						fsm_state <= 166;
+					end
+				end
+				166: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						cosTheta_cosPhi_Tz <= mul_result[35:20];	
+						fsm_state <= 167;
+					end
+				end
+				167: begin
 						M_00 <= cosTheta;					// Q8.8
-						M_01 <= 0;
-						M_02 <= sinTheta;
+						M_01 <= sinTheta_sinPhi;
+						M_02 <= sinTheta_cosPhi;
 						M_03 <= 0;
 						M_10 <= 0;					
-						M_11 <= 16'sb0000_0001_0000_0000;
-						M_12 <= 0;
+						M_11 <= cosPhi;
+						M_12 <= ~sinPhi + 16'sb0000_0000_0000_0001;	
 						M_13 <= 0;
 						M_20 <= ~sinTheta + 16'sb0000_0000_0000_0001;			
-						M_21 <= 0;
-						M_22 <= cosTheta;
-						M_23 <= 0;
+						M_21 <= cosTheta_sinPhi;
+						M_22 <= cosTheta_cosPhi;
+						M_23 <= {translate_z,8'sb0};
 						M_30 <= 0;					
 						M_31 <= 0;
 						M_32 <= 0;
 						M_33 <= 16'sb0000_0001_0000_0000;
 
-						fsm_state <= 170;
+						fsm_state <= 168;
 				end 
-				//	- dir light rot 1 axis
+				//	- dir light in world space, rot 1 axis
+				168: begin
+					// -- sinLight
+					if(rotY_light == 90)begin
+						sinLight <= 16'sb0000_0001_0000_0000;
+						fsm_state <= 172;
+					end else if(rotY_light == 270) begin
+						sinLight <= 16'sb1111_1111_0000_0000;
+						fsm_state <= 172;
+					end else begin
+						fsm_state <= 169;
+					end
+				end
+				169: begin
+					if(rotY_light < 90) begin
+						sine_angle <= rotY_light;
+					end else if(rotY_light < 180) begin
+						sine_angle <= 180 - rotY_light;
+					end else if(rotY_light < 270) begin
+						sine_angle <= rotY_light - 180;
+					end else begin
+						sine_angle <= 360 - rotY_light;
+					end
+					fsm_state <= 170;
+				end
 				170: begin
-						fsm_state <= 190;
-				end 
+					sinLight <= {8'b0,sine_value};
+					fsm_state <= 171;
+				end
+				171: begin
+					if(rotY_light >= 180) begin
+						sinLight <= ~sinLight + 16'sb0000_0000_0000_0001;	
+					end
+					fsm_state <= 172;
+				end
+				172: begin
+					// -- cosLight
+					if(rotY_light_90 == 90)begin
+						cosLight <= 16'sb0000_0001_0000_0000;
+						fsm_state <= 176;
+					end else if(rotY_light_90 == 270) begin
+						cosLight <= 16'sb1111_1111_0000_0000;
+						fsm_state <= 176;
+					end else begin
+						fsm_state <= 173;
+					end
+				end
+				173: begin
+					if(rotY_light_90 < 90) begin
+						sine_angle <= rotY_light_90;
+					end else if(rotY_light_90 < 180) begin
+						sine_angle <= 180 - rotY_light_90;
+					end else if(rotY_light_90 < 270) begin
+						sine_angle <= rotY_light_90 - 180;
+					end else begin
+						sine_angle <= 360 - rotY_light_90;
+					end
 
+					fsm_state <= 174;
+				end
+				174: begin
+					cosLight <= {8'b0,sine_value};
+					fsm_state <= 175;
+				end
+				175: begin
+					if(rotY_light_90 >= 180) begin
+						cosLight <= ~cosLight + 16'sb0000_0000_0000_0001;	
+					end
+					fsm_state <= 176;
+				end
+				//	-- dot x,z to rot light
+				176: begin
+					lightW_y <= light_y;
+					dot_start <= 1;
+					fsm_state <= 177;
+				end
+				177: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						lightW_x <= dot_result;
+						dot_start <= 1;
+						fsm_state <= 178;
+					end
+				end 
+				178: begin
+					dot_start <= 0;
+					if (dot_done) begin
+						lightW_z <= dot_result;
+						fsm_state <= 190;
+					end
+				end 
+				//free state 179-189
 				//	- set [M*VP]
 				190: begin
 						dot_start <= 1;
@@ -1107,19 +1482,18 @@ module vsfs (
 
 				//	- [M-1]
 				210: begin
-						// rotY only
 						M_00 <= cosTheta;					// Q8.8
 						M_01 <= 0;
 						M_02 <= ~sinTheta + 16'sb0000_0000_0000_0001;		
-						M_03 <= 0;
-						M_10 <= 0;					
-						M_11 <= 16'sb0000_0001_0000_0000;
-						M_12 <= 0;
-						M_13 <= 0;
-						M_20 <= sinTheta;					
-						M_21 <= 0;
-						M_22 <= cosTheta;
-						M_23 <= 0;
+						M_03 <= sinTheta_Tz;
+						M_10 <= sinTheta_sinPhi;					
+						M_11 <= cosPhi;
+						M_12 <= cosTheta_sinPhi;
+						M_13 <= ~cosTheta_sinPhi_Tz + 16'sb0000_0000_0000_0001;	
+						M_20 <= sinTheta_cosPhi;					
+						M_21 <= ~sinPhi + 16'sb0000_0000_0000_0001;	
+						M_22 <= cosTheta_cosPhi;
+						M_23 <= ~cosTheta_cosPhi_Tz + 16'sb0000_0000_0000_0001;	
 						M_30 <= 0;					
 						M_31 <= 0;
 						M_32 <= 0;
@@ -1155,7 +1529,7 @@ module vsfs (
 					end
 				end 
 
-				//	- [M-1]*lightpos 
+				//	- [M-1]*lightdir
 				240: begin
 					dot_start <= 0;
 					if (dot_done) begin
@@ -1196,7 +1570,7 @@ module vsfs (
 				31: begin
 					if(tri_idx == numtri)begin
 						// wait a few clk before eof to send do_swap
-						if ((y == 524) & (x == 770)) begin
+						if ((y == 524) && (x == 770)) begin
 							do_swap <= 1;
 							vsfs_running <= 0;
 							fsm_state <= 0;
@@ -1281,6 +1655,9 @@ module vsfs (
 						if (dot_result[15] == 1'b1)  begin  	   	  // backfacing
 							tri_idx <= tri_idx + 1;
 							fsm_state <= 31;
+
+							// debug
+							//fsm_state <= 37;
 						end else begin
 							fsm_state <= 37;
 						end
@@ -1550,29 +1927,37 @@ module vsfs (
 				
 			// 2.3 dot(light,n)
 				62:begin
-					dot_start <= 1;
-					fsm_state <= 63;
+					// if((z_screen_v0[21:20] != 0) || (z_screen_v1[21:20] != 0) || (z_screen_v2[21:20] != 0)) begin
+					// 	fsm_state <= 1;
+					// end else begin
+						dot_start <= 1;
+						fsm_state <= 63;
+					//end
 				end
 				63: begin
 					dot_start <= 0;
 					if (dot_done) begin
 						if (dot_result[9] == 1'b1) begin  	   	  		// backfacing 1x.xxx
-							if (dot_result[8:6] == 3'b100) begin  			// 11.000 -> -1
-								shade_color[2:1] <= 2'b11;
-							end
-							else if (dot_result[9:8] == 2'b10) begin 		// 10.xxx -> -1.xxx
-								shade_color[2:1] <= 2'b11;
-							end
-							else begin
-								shade_color[2:1] <= ~dot_result[7:6];						// 11.xxx -> -0.xxx
-							end
+							// if (dot_result[8:6] == 3'b100) begin  			// 11.000 -> -1
+							// 	shade_color[2:1] <= 2'b11;
+							// end
+							// else if (dot_result[9:8] == 2'b10) begin 		// 10.xxx -> -1.xxx
+							// 	shade_color[2:1] <= 2'b11;
+							// end
+							// else begin
+							// 	shade_color[2:1] <= ~dot_result[7:6];						// 11.xxx -> -0.xxx
+							// end
+							shade_color <= 4'b0000;
 						end
 						else begin
+							// dot x tri_color
 							if (dot_result[8:5] == 4'b1000) begin 			// 01.000 -> 1
-								shade_color[2:1] <= 2'b11;
+								//shade_color <= 4'b0110;
+								shade_color <= {tri_color,2'b11};
 							end
 							else begin
-								shade_color[2:1] <= dot_result[7:6];							// 0.000 - 0.111
+								//shade_color <= {1'b0,dot_result[7:6],1'b0};							// 0.000 - 0.111
+								shade_color <= {tri_color,dot_result[7:6]};
 							end
 						end
 						fsm_state <= 74;
@@ -1693,7 +2078,6 @@ module vsfs (
 				// Q2.20 denom = float2fix14(1.0f/denom_i);
 				// 640x640 x2 = 819,200      2^20
 				// 1/819,200 = 0.00000122,   1/2^20   
-				
 				87: begin
 						mul_a <= {y_screen_v1 - y_screen_v2,2'b00};			
 						mul_b <= {x_screen_v0 - x_screen_v2,2'b00};	
@@ -1751,6 +2135,10 @@ module vsfs (
 				//		bar_ix_dy <= x2x1 * denom;
 				//		bar_ix_dx <= y1y2 * denom;
 
+				// 	denom Q2.20 -> Q6.16
+				//	x_screen, bbox Q20.0
+				//	Q20.2 x Q2.20 = Q22.22 -> Q6.16 for bar
+
 				92: begin
 					mul_a <= {y_screen_v2 - y_screen_v0,2'b00};						
 					mul_b <= {bboxMin_X - x_screen_v2,2'b00};			
@@ -1779,7 +2167,7 @@ module vsfs (
 				95: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_iy <= mul_result[23:2];								// ready in 23clk for 20bit mul
+						bar_iy <= mul_result[27:6];								// ready in 23clk for 20bit mul
 						//
 						mul_a <= {x_screen_v0 - x_screen_v2,2'b00};		
 						mul_b <= denom;					
@@ -1790,7 +2178,7 @@ module vsfs (
 				96: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_iy_dy <= mul_result[23:2];							// ready in 23clk for 20bit mul
+						bar_iy_dy <= mul_result[27:6];							// ready in 23clk for 20bit mul
 						//
 						mul_a <= {y_screen_v2 - y_screen_v0,2'b00};			
 						mul_b <= denom;					
@@ -1801,7 +2189,7 @@ module vsfs (
 				97: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_iy_dx <= mul_result[23:2];							// ready in 23clk for 20bit mul
+						bar_iy_dx <= mul_result[27:6];							// Q6.16, Q2.20 is [23:2]
 						//
 						mul_a <= {y_screen_v0 - y_screen_v1,2'b00};						
 						mul_b <= {bboxMin_X - x_screen_v0,2'b00};				
@@ -1831,7 +2219,7 @@ module vsfs (
 				100: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_iz <= mul_result[23:2];								// ready in 23clk for 20bit mul
+						bar_iz <= mul_result[27:6];								// ready in 23clk for 20bit mul
 						//
 						mul_a <= {x_screen_v1 - x_screen_v0,2'b00};		
 						mul_b <= denom;					
@@ -1842,7 +2230,7 @@ module vsfs (
 				101: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_iz_dy <= mul_result[23:2];							// ready in 23clk for 20bit mul
+						bar_iz_dy <= mul_result[27:6];							// ready in 23clk for 20bit mul
 						//
 						bar_ix <= bar_iy + bar_iz;
 						//
@@ -1855,9 +2243,9 @@ module vsfs (
 				102: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_iz_dx <= mul_result[23:2];							// ready in 23clk for 20bit mul
+						bar_iz_dx <= mul_result[27:6];							// ready in 23clk for 20bit mul
 						//
-						bar_ix <= 22'b01_0000_0000_0000_0000_0000 - bar_ix;
+						bar_ix <= 22'b00_0001_0000_0000_0000_0000 - bar_ix;		// 1 in Q6.16
 						//
 						mul_a <= {x_screen_v2 - x_screen_v1,2'b00};		
 						mul_b <= denom;					
@@ -1868,7 +2256,7 @@ module vsfs (
 				103: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_ix_dy <= mul_result[23:2];							// ready in 23clk for 20bit mul
+						bar_ix_dy <= mul_result[27:6];							// ready in 23clk for 20bit mul
 						//
 						mul_a <= {y_screen_v1 - y_screen_v2,2'b00};			
 						mul_b <= denom;					
@@ -1879,7 +2267,7 @@ module vsfs (
 				104: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						bar_ix_dx <= mul_result[23:2];							// ready in 23clk for 20bit mul
+						bar_ix_dx <= mul_result[27:6];							// ready in 23clk for 20bit mul
 						//
 						fsm_state <= 105;
 					end
@@ -1889,7 +2277,9 @@ module vsfs (
 				// 		z_bar = z_screen_v0*bar_ix + z_screen_v1*bar_iy + z_screen_v2*bar_iz
 				// 		z_bar_dx = z_screen_v0*bar_ix_dx + z_screen_v1*bar_iy_dx + z_screen_v2*bar_iz_dx
 				// 		z_bar_dy = z_screen_v0*bar_ix_dy + z_screen_v1*bar_iy_dy + z_screen_v2*bar_iz_dy
-				//		Q2.20 * Q2.20 = Q4.40 -> Q2.20
+				//		Q2.20 * Q2.20 = Q4.40 -> Q2.20 [41:20]
+				//
+				//		Q2.20 * Q6.16 = Q8.36 -> Q6.16 [41:20]  same bit select
 				105: begin
 					mul_a <= z_screen_v0;						
 					mul_b <= bar_ix;			
@@ -1899,7 +2289,7 @@ module vsfs (
 				106: begin
 					mul_start <= 0;
 					if (mul_done) begin
-						z_bar <= mul_result[41:20];						// ready in 23clk for 20bit mul
+						z_bar <= mul_result[41:20];						
 						mul_a <= z_screen_v1;		
 						mul_b <= bar_iy;					
 						mul_start <= 1;
@@ -1921,7 +2311,7 @@ module vsfs (
 					if (mul_done) begin
 						z_bar <= z_bar + mul_result[41:20];						// ready in 23clk for 20bit mul
 						//
-						mul_a <= z_screen_v0;	;		
+						mul_a <= z_screen_v0;	
 						mul_b <= bar_ix_dx;					
 						mul_start <= 1;
 						fsm_state <= 109;
@@ -1952,7 +2342,7 @@ module vsfs (
 					if (mul_done) begin
 						z_bar_dx <= z_bar_dx + mul_result[41:20];						// ready in 23clk for 20bit mul
 						//
-						mul_a <= z_screen_v0;	;		
+						mul_a <= z_screen_v0;		
 						mul_b <= bar_ix_dy;					
 						mul_start <= 1;
 						fsm_state <= 112;
@@ -2088,61 +2478,64 @@ module vsfs (
 				//		- pixel[0-4].cz = (Z < Zbuffer)? cz: pixel[0-4].cz
 				//	screen y, 0 at the top (reverse opengl), use e0 > 0
 				122: begin
+					fsm_state <= 123;
+
 					vsfs_stop_txn <= 0;
-					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
-					//if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
+					if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) begin
+					//if (((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) || ((e0 < 0) && (e1 < 0) && (e2 < 0))) begin
 						//C_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? tri_idx[3:0]+1 : C_buffer[0]; 
-						C_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? shade_color : C_buffer[0]; 
-						Z_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? pixel_z[19:12] : Z_buffer[0]; 
-						//C_buffer[0] <= tri_idx[3:0]+1;
+						
+						C_buffer[0] <= ((pixel_z[15:8] < Z_buffer[0]) && (pixel_z[21:16] == 0))? 
+														shade_color : C_buffer[0]; 
+						Z_buffer[0] <= ((pixel_z[15:8] < Z_buffer[0]) && (pixel_z[21:16] == 0))? 
+														pixel_z[15:8] : Z_buffer[0]; 
 					end 
 					e0 <= e0 + (y_screen_v1 - y_screen_v0);
 					e1 <= e1 + (y_screen_v2 - y_screen_v1);
 					e2 <= e2 + (y_screen_v0 - y_screen_v2);
 					pixel_z <= pixel_z + z_bar_dx;
-					fsm_state <= 123;
 				end
 				123: begin
-					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
-					// if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
-						//C_buffer[1] <= (pixel_z[19:12] < Z_buffer[1])? tri_idx[3:0] : C_buffer[1]; 
-						C_buffer[1] <= (pixel_z[19:12] < Z_buffer[1])? shade_color : C_buffer[1]; 
-						Z_buffer[1] <= (pixel_z[19:12] < Z_buffer[1])? pixel_z[19:12] : Z_buffer[1]; 
-						// C_buffer[1] <= tri_idx[3:0]; 
+					fsm_state <= 124;
+
+					if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) begin
+						C_buffer[1] <= ((pixel_z[15:8] < Z_buffer[1]) && (pixel_z[21:16] == 0))? 
+														shade_color : C_buffer[1]; 
+						Z_buffer[1] <= ((pixel_z[15:8] < Z_buffer[1]) && (pixel_z[21:16] == 0))? 
+														pixel_z[15:8] : Z_buffer[1]; 
 					end 
 					e0 <= e0 + (y_screen_v1 - y_screen_v0);
 					e1 <= e1 + (y_screen_v2 - y_screen_v1);
 					e2 <= e2 + (y_screen_v0 - y_screen_v2);
 					pixel_z <= pixel_z + z_bar_dx;
-					fsm_state <= 124;
 				end
 				124: begin
-					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
-					// if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
-						//C_buffer[2] <= (pixel_z[19:12] < Z_buffer[2])? tri_idx[3:0]+1 : C_buffer[2]; 
-						C_buffer[2] <= (pixel_z[19:12] < Z_buffer[2])? shade_color : C_buffer[2]; 
-						Z_buffer[2] <= (pixel_z[19:12] < Z_buffer[2])? pixel_z[19:12] : Z_buffer[2]; 
-						// C_buffer[2] <= tri_idx[3:0]+1;
+					fsm_state <= 125;
+
+					if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) begin
+						C_buffer[2] <= ((pixel_z[15:8] < Z_buffer[2]) && (pixel_z[21:16] == 0))? 
+														shade_color : C_buffer[2]; 
+						Z_buffer[2] <= ((pixel_z[15:8] < Z_buffer[2]) && (pixel_z[21:16] == 0))? 
+														pixel_z[15:8] : Z_buffer[2]; 
 					end 
 					e0 <= e0 + (y_screen_v1 - y_screen_v0);
 					e1 <= e1 + (y_screen_v2 - y_screen_v1);
 					e2 <= e2 + (y_screen_v0 - y_screen_v2);
 					pixel_z <= pixel_z + z_bar_dx;
-					fsm_state <= 125;
 				end
 				125: begin
-					if ((e0 > 0) & (e1 > 0) & (e2 > 0)) begin
-					// if (((e0 > 0) & (e1 > 0) & (e2 > 0)) | ((e0 < 0) & (e1 < 0) & (e2 < 0))) begin
-						//C_buffer[3] <= (pixel_z[19:12] < Z_buffer[3])? tri_idx[3:0] : C_buffer[3]; 
-						C_buffer[3] <= (pixel_z[19:12] < Z_buffer[3])? shade_color : C_buffer[3]; 
-						Z_buffer[3] <= (pixel_z[19:12] < Z_buffer[3])? pixel_z[19:12] : Z_buffer[3]; 
-						// C_buffer[3] <= tri_idx[3:0];
+					fsm_state <= 126;
+
+					if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) begin
+						C_buffer[3] <= ((pixel_z[15:8] < Z_buffer[3]) && (pixel_z[21:16] == 0))? 
+														shade_color : C_buffer[3]; 
+						Z_buffer[3] <= ((pixel_z[15:8] < Z_buffer[3]) && (pixel_z[21:16] == 0))? 
+														pixel_z[15:8] : Z_buffer[3]; 
 					end 
 					e0 <= e0 + (y_screen_v1 - y_screen_v0);
 					e1 <= e1 + (y_screen_v2 - y_screen_v1);
 					e2 <= e2 + (y_screen_v0 - y_screen_v2);
 					pixel_z <= pixel_z + z_bar_dx;
-					fsm_state <= 126;
 				end
 				// - WRITE x4 Z (16 clk) 
 				126: begin
@@ -2156,7 +2549,7 @@ module vsfs (
 						fsm_state <= 127;
 					end
 				end
-				//   -- wait & write 4 Z
+				//   -- wait and write 4 Z
 				127: begin
 					vsfs_start_write <= 0;
 					if(spi_data_req)begin
@@ -2180,7 +2573,7 @@ module vsfs (
 					numread <= numread + 1;
 					fsm_state <= 129;
 				end
-				//   -- wait wait & write 4 color
+				//   -- wait wait and write 4 color
 				129: begin
 					vsfs_start_write <= 0;
 					if(spi_data_req)begin
