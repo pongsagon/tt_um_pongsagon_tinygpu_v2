@@ -9,11 +9,21 @@ You can also include images in this folder and reference them in the markdown. E
 
 ## How it works
 
-WIP
+TinyGPU v2.0. A standalone GPU that can display a model file from FLASH.  	
+	Render 1K tri at 6.5fps in 320x240, 4-bit color.  
+
+	Spec:
+	- GPU can performs transformation & lighting, rasterization
+	- 4-bit double buffer, 8-bit depth buffer store on QSPI RAM
+	- max tri 1K
+	- backface culling
+	- 1 dynamic directional light, flat shading
+	- use Gamepad to transform the model and rotate light
+	- run at 25Mhz. When fab, it will use around 200k transistor  
 
 ## How to test
 
-WIP
+Updating document, Please come back again
 
 ## External hardware
 
