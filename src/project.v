@@ -1,27 +1,48 @@
 
 /* Matt pongsagon
 
-  Task: raster screen space tri
+  Task: 
     0. enter Quad mode
+    0. read 3 byte
+      - #tri, tex? -> save as reg
     1. copy flash->ram 
-      - read numtri (2 byte)
-      - each vertex: XY screen Q16.0, Z screen 0.16
+      - 32768 byte: 256x256 tex, 4-bit/texel
+      - each tri: 22/28 byte
     2. read front, clear back
     3. clear z
     4. swap
 
   Include module
-    - spi_flash_controller
     - vga
+    - gamepad
     - vsfs
+    - spi_flash_controller
+    - color_palette
+
+
+  Addr flash
+    - byte 0,1: #tri
+    - byte 3: tex?
+    // has tex
+    - byte 32768: 256x256 tex
+    - each tri: 28 byte
+    // no tex
+    - each tri: 22 byte
 
  
   Addr RAM space
     - after reset, FSM will drive start read
     - 0:      front, FLASH tri
-    - 38400:  back
-    - 76800:  z
+    - 38400:  back (4bit x 320x240)
+    - 76800:  z (8bit x 320x240)
     - 153600: tri (<1024)
+      // has tex
+      - 32768 byte: 256x256 tex
+      - each tri: 28 byte
+      // no tex
+      - each tri: 22 byte
+
+
 
   - ui_in[2:0]: latency, 
   - ui_in[6:4]: gamepad pmod
@@ -47,27 +68,27 @@ module tt_um_pongsagon_tinygpu_v2 (
 
     // // things to watch
     // output wire debug_do_swap,
-    // output wire debug_ram_notbusy,
-    // output  wire [19:0] debug_x_screen_v0,
-    // output  wire [19:0] debug_x_screen_v1,
-    // output  wire [19:0] debug_x_screen_v2,
-    // output  wire [19:0] debug_y_screen_v0,
-    // output  wire [19:0] debug_y_screen_v1,
-    // output  wire [19:0] debug_y_screen_v2,
-    // output  wire [21:0] debug_z_screen_v0,
-    // output  wire [21:0] debug_z_screen_v1,
-    // output  wire [21:0] debug_z_screen_v2,
-    // output wire [8:0] debug_numtri,
+    // // output wire debug_ram_notbusy,
+    // output  wire [15:0] debug_x_model_v0,
+    // output  wire [15:0] debug_x_model_v1,
+    // output  wire [15:0] debug_x_model_v2,
+    // output  wire [15:0] debug_y_model_v0,
+    // output  wire [15:0] debug_y_model_v1,
+    // output  wire [15:0] debug_y_model_v2,
+    // output  wire [15:0] debug_z_model_v0,
+    // output  wire [15:0] debug_z_model_v1,
+    // output  wire [15:0] debug_z_model_v2,
+    // output  wire [15:0] debug_nx,
+    // output  wire [15:0] debug_ny,
+    // output  wire [15:0] debug_nz,
+    // output  wire [1:0] debug_tri_color,
     // output wire [7:0] debug_vsfs_fsm_state,
-    // output wire [4:0] debug_fsm_state,
-    // output wire debug_start_printing,
-    // output wire [3:0] debug_spi_data,
+    // // output wire [9:0] debug_numtri,
+    // // output wire [4:0] debug_fsm_state,
+    // // output wire debug_start_printing,
+    // // output wire [3:0] debug_spi_data,
     // output wire [7:0] debug_sub_frame,
     // output reg [21:0] debug_clk,           // >2.11M   
-
-
-
-
 
     input  wire       rst_n    // reset_n - low to reset
   );
@@ -133,20 +154,24 @@ module tt_um_pongsagon_tinygpu_v2 (
 
 
   // main FSM
-  parameter   SLOWEST_STATE       = 85;   // 65 RW time + 16 wait + 4 safe = 85
+  reg has_tex; 
   reg [4:0] fsm_state;        // 0-31: state
   reg [4:0] read_delay;       // flash: 24, RAM R: 16,
   reg [17:0] numread;         // #4bit read, >153600 (#z pixel)
-  reg [3:0] pixels [3:0];     // do 4pixel at atime
+  reg [3:0] pixels [5:0];     // do 4pixel at atime, pixels[5:4] is for reading has_tex bit
+  reg [3:0] buffer [3:0]; 
   reg [7:0] sub_frame;        // must < 255, start with 1 not 0
   reg evenframe;              // 1: front -> 0, 0: front -> 38400
-  reg [16:0] drawPixel;       // >76800 (320x240), draw @pixel
   wire [9:0] yplus1;          // to set addr for the next line
   assign yplus1 = y + 1;
   //
-  reg [14:0] i_numtri_byte;   // for loop read numtri
-  wire [14:0] numtri_byte;     // numtri * 22 (2 x 3xyz x 3vert + 4 (normal/color));
-  assign numtri_byte = {1'b0,numtri,4'b0} + {3'b0,numtri,2'b0} + {4'b0,numtri,1'b0};
+  reg [15:0] i_numtri_byte;    // for loop read numtri, 1024x28=28672+32768 <65536
+  wire [15:0] numtri_byte;     // numtri * 22 (2 x 3xyz x 3vert + 4 (normal/color)), 22528
+  wire [15:0] numtri_byte_tex; // numtri * 28 (22 + 2x3 (uv x 3vert)) + 32768;
+  assign numtri_byte = {2'b0,numtri,4'b0} + {4'b0,numtri,2'b0} + {5'b0,numtri,1'b0};        // 16+4+2
+  assign numtri_byte_tex = {2'b0,numtri,4'b0} + {3'b0,numtri,3'b0} 
+                            + {4'b0,numtri,2'b0} + {16'h8000};    // 16+8+4
+  
   //
   reg display_start_read;
   reg display_start_write;
@@ -159,8 +184,10 @@ module tt_um_pongsagon_tinygpu_v2 (
   wire eof;               // stop access mem to display image
   wire eol_e;
   wire eof_e;
-  assign eol = (y < 239) && (x > (799-SLOWEST_STATE)) && (sub_frame > 1);
-  assign eof = (y == 524) && (x > (799-SLOWEST_STATE));    // true(725,524)->, false(0,0)
+  wire [9:0] SLOWEST_STATE;
+  assign SLOWEST_STATE = (has_tex)? 97 : 85;       // 65/77 RW time + 16 wait + 4 safe        
+  assign eol = (y < 239) && (x > (10'd799-SLOWEST_STATE)) && (sub_frame > 1);
+  assign eof = (y == 524) && (x > (10'd799-SLOWEST_STATE));    // true(725,524)->, false(0,0)
   assign eol_e = (y < 239) && (x > 782) && (sub_frame > 1);
   assign eof_e = (y == 524) && (x > 782);    
   // mux between VSFS and display to ram
@@ -202,6 +229,27 @@ module tt_um_pongsagon_tinygpu_v2 (
       .is_present(gamepad_present)
   );
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   vsfs _vsfs(
       .clk(clk),
       .reset(rst_n),
@@ -220,22 +268,23 @@ module tt_um_pongsagon_tinygpu_v2 (
       .numtri(numtri),
       .evenframe(evenframe),
       .gamepad_input(gamepad_input),
-      
+      .has_tex(has_tex),
+
       //
-      // .debug_x_screen_v0(debug_x_screen_v0),
-      // .debug_x_screen_v1(debug_x_screen_v1),
-      // .debug_x_screen_v2(debug_x_screen_v2),
-      // .debug_y_screen_v0(debug_y_screen_v0),
-      // .debug_y_screen_v1(debug_y_screen_v1),
-      // .debug_y_screen_v2(debug_y_screen_v2),
-      // .debug_z_screen_v0(debug_z_screen_v0),
-      // .debug_z_screen_v1(debug_z_screen_v1),
-      // .debug_z_screen_v2(debug_z_screen_v2),
+      // .debug_x_model_v0(debug_x_model_v0),
+      // .debug_x_model_v1(debug_x_model_v1),
+      // .debug_x_model_v2(debug_x_model_v2),
+      // .debug_y_model_v0(debug_y_model_v0),
+      // .debug_y_model_v1(debug_y_model_v1),
+      // .debug_y_model_v2(debug_y_model_v2),
+      // .debug_z_model_v0(debug_z_model_v0),
+      // .debug_z_model_v1(debug_z_model_v1),
+      // .debug_z_model_v2(debug_z_model_v2),
+      // .debug_nx(debug_nx),
+      // .debug_ny(debug_ny),
+      // .debug_nz(debug_nz),
+      // .debug_tri_color(debug_tri_color),
       // .debug_vsfs_fsm_state(debug_vsfs_fsm_state),
-
-
-
-
 
       .ram_notbusy(ram_notbusy)
   );
@@ -267,30 +316,31 @@ module tt_um_pongsagon_tinygpu_v2 (
       .at_quadmode (spi_at_quadmode)
   );
 
-  
+
   wire [5:0] color;
   color_palette _color(.spi_data(spi_data),.color(color));
 
   // pixel spi data to uo_out
-  assign uo_out[0] = (setblack_?0:color[5]); //R1
-  assign uo_out[1] = (setblack_?0:color[3]); //G1
-  assign uo_out[2] = (setblack_?0:color[1]); //B1
+  assign uo_out[0] = (setblack_?0: (has_tex)? spi_data[3] : color[5]); //R1
+  assign uo_out[1] = (setblack_?0: (has_tex)? spi_data[2] : color[3]); //G1
+  assign uo_out[2] = (setblack_?0: (has_tex)? spi_data[0] : color[1]); //B1
   assign uo_out[3] = VS;
-  assign uo_out[4] = (setblack_?0:color[4]); //R0
-  assign uo_out[5] = (setblack_?0:color[2]); //G0
-  assign uo_out[6] = (setblack_?0:color[0]); //B0
+  assign uo_out[4] = (setblack_?0: (has_tex)? spi_data[3] : color[4]); //R0
+  assign uo_out[5] = (setblack_?0: (has_tex)? spi_data[1] : color[2]); //G0
+  assign uo_out[6] = (setblack_?0: (has_tex)? spi_data[0] : color[0]); //B0
   assign uo_out[7] = HS;
   
-
+  
   always @(posedge clk) begin
     if(!rst_n) begin
+      has_tex <= 0;
       fsm_state <= 0;
       read_delay <= 0;
       numread <= 0;
       sub_frame <= 0;
       evenframe <= 1;
-      drawPixel <= 0;
       i_numtri_byte <= 0;
+      // pixels [5:0], buffer[3:0]
       //
       //debug_clk <= 0;
       // SPI
@@ -323,7 +373,7 @@ module tt_um_pongsagon_tinygpu_v2 (
           end
         end
       // 1. copy Flash -> RAM (fsm 2 - 10)
-        //  - read numtri (2 byte), at addr 153600
+        //  - read numtri (2 byte) + has_tex (1 byte), at addr 153600
         2: begin
           display_stop_txn <= 0;
           numread <= 0;
@@ -337,7 +387,7 @@ module tt_um_pongsagon_tinygpu_v2 (
           display_start_read <= 0;
           if(read_delay == 24) begin
             read_delay <= 0;
-            pixels[numread[1:0]] <= spi_data;
+            pixels[numread[2:0]] <= spi_data;
             numread <= 1;
             fsm_state <= 4;
           end 
@@ -345,11 +395,11 @@ module tt_um_pongsagon_tinygpu_v2 (
             read_delay <= read_delay + 1;
           end
         end
-        //   -- read 3 more 4bit
+        //   -- read 5 more 4bit
         4: begin
-          pixels[numread[1:0]] <= spi_data;
+          pixels[numread[2:0]] <= spi_data;
           numread <= numread + 1;
-          if(numread == 3)begin
+          if(numread == 5)begin
             numread <= 0;
             display_stop_txn <= 1;
             fsm_state <= 5;
@@ -358,18 +408,25 @@ module tt_um_pongsagon_tinygpu_v2 (
         //   -- save to numtri, little endian -> big endian
         5: begin
           display_stop_txn <= 0;
+          has_tex <= pixels[5][0];
           numtri[9:8] <= pixels[3][1:0];
           numtri[3:0] <= pixels[1];
           numtri[7:4] <= pixels[0];
           i_numtri_byte <= 0;
-          display_addr <= 2;
+          display_addr <= 3;    // 1st addr of tex / tri
           fsm_state <= 6;
         end
-        //  - for loop copy each vertex: XYZ Q8.8 x3 + color/face_normal.zyx 4 byte
+
+        // 2 cases
+        //  tex:
+        //    - for loop copy tex from flash->ram
+        //    - for loop copy each tri: 28 byte
+        //  notex:
+        //    - for loop copy each tri: 22 byte
         6: begin
           display_stop_txn <= 0;
           numread <= 0;
-          if(i_numtri_byte == numtri_byte)begin
+          if(i_numtri_byte == ((has_tex)? numtri_byte_tex : numtri_byte)) begin
             i_numtri_byte <= 0;
             fsm_state <= 11;
           end else begin
@@ -383,7 +440,7 @@ module tt_um_pongsagon_tinygpu_v2 (
           display_start_read <= 0;
           if(read_delay == 24) begin
             read_delay <= 0;
-            pixels[numread[1:0]] <= spi_data;
+            buffer[numread[1:0]] <= spi_data;
             numread <= 1;
             fsm_state <= 8;
           end 
@@ -393,7 +450,7 @@ module tt_um_pongsagon_tinygpu_v2 (
         end
         //   -- read 3 more 4bit
         8: begin
-          pixels[numread[1:0]] <= spi_data;
+          buffer[numread[1:0]] <= spi_data;
           numread <= numread + 1;
           if(numread == 3)begin
             numread <= 0;
@@ -406,8 +463,9 @@ module tt_um_pongsagon_tinygpu_v2 (
           display_stop_txn <= 0;
           spi_select_ROM <= 0;
           display_start_write <= 1;
-          display_addr <= 24'd153600 + {9'b0,i_numtri_byte};
-          display_data_in <= pixels[numread[1:0] + 2'b10];
+          // addr of ram
+          display_addr <= 24'd153600 + {8'b0,i_numtri_byte};
+          display_data_in <= buffer[numread[1:0] + 2'b10];    // little->big
           numread <= numread + 1;
           fsm_state <= 10;
         end
@@ -415,17 +473,20 @@ module tt_um_pongsagon_tinygpu_v2 (
         10: begin
           display_start_write <= 0;
           if (spi_data_req) begin
-            display_data_in <= pixels[numread[1:0] + 2'b10];
+            display_data_in <= buffer[numread[1:0] + 2'b10];
             numread <= numread + 1;
             if(numread == 3) begin
               numread <= 0;
               display_stop_txn <= 1;
-              display_addr <= {9'b0,i_numtri_byte} + 4; // 4 = offset #tri 2byte + next 2 byte
+              // addr of flash
+              display_addr <= {8'b0,i_numtri_byte} + 5; // 5 = offset #tri+hastex 3byte + next 2 byte
               i_numtri_byte <= i_numtri_byte + 2;
               fsm_state <= 6;
             end
           end
         end
+
+
 
       // 2. RAM front -> vga uo_out[] + clear Back (fsm 11 - 16)
         //  - wait for eof last line y and x 16 clk ahead to read the first pixel 
@@ -437,7 +498,7 @@ module tt_um_pongsagon_tinygpu_v2 (
             evenframe <= !evenframe;
             sub_frame <= 0;
           end
-          else if ((y == 524) && (x == 783)) begin     //mark1, eof
+          else if ((y == 524) && (x == 783)) begin     //mark1: eof
             spi_select_ROM <= 0;
             display_start_read <= 1;
             display_addr <= (evenframe)?0:38400;
@@ -461,7 +522,7 @@ module tt_um_pongsagon_tinygpu_v2 (
         // - keep display pixels for 1 line, until hblank 
         13: begin
           numread <= numread + 1;
-          if(numread == 319) begin
+          if(numread == 319) begin            //mark2: fin draw 1 line
             numread <= 0;
             display_stop_txn <= 1;
             if (sub_frame == 1) begin
@@ -498,7 +559,7 @@ module tt_um_pongsagon_tinygpu_v2 (
               display_stop_txn <= 1;
               if (y == 239) begin               //mark5: to clearZ
                 fsm_state <= 17;
-              end else begin                    //mark3
+              end else begin                    //mark3: fin clear back 1 line
                 fsm_state <= 16;
               end
             end
@@ -508,7 +569,7 @@ module tt_um_pongsagon_tinygpu_v2 (
         // enter here from 13 OR 15
         16: begin
           display_stop_txn <= 0;
-          if (x == 783) begin               //mark4
+          if (x == 783) begin                   //mark4: eol
             display_start_read <= 1;
             display_addr <= (evenframe)?{7'b0,yplus1,7'b0} + {9'b0,yplus1,5'b0}:
                                 {7'b0,yplus1,7'b0} + {9'b0,yplus1,5'b0} + 38400;
@@ -530,10 +591,9 @@ module tt_um_pongsagon_tinygpu_v2 (
           if (spi_data_req) begin
             display_data_in <= 4'b1111;
             numread <= numread + 1;
-            if (numread == 153599)begin       //mark6
+            if (numread == 153599)begin       //mark6: fin clear z
               numread <= 0;
-              display_stop_txn <= 1;
-              drawPixel <= 0;          
+              display_stop_txn <= 1;       
               start_vsfs <= 1;
               fsm_state <= 11;
             end
@@ -553,13 +613,13 @@ module tt_um_pongsagon_tinygpu_v2 (
   // assign sim_x = x;
   // assign sim_y = y;
   // assign sim_blank = blank;
-  // // debug
-  // assign debug_numtri = numtri;
-  // assign debug_fsm_state = fsm_state;
-  // assign debug_start_printing = ((fsm_state == 11) & ((y == 524) & (x == 783)));
-  // assign debug_spi_data = spi_data;
+  // // // debug
+  // // assign debug_numtri = numtri;
+  // // assign debug_fsm_state = fsm_state;
+  // // assign debug_start_printing = ((fsm_state == 11) && ((y == 524) && (x == 783)));
+  // // assign debug_spi_data = spi_data;
   // assign debug_sub_frame = sub_frame;
-  // assign debug_ram_notbusy = ram_notbusy;
+  // // assign debug_ram_notbusy = ram_notbusy;
   // assign debug_do_swap = do_swap;
 
     

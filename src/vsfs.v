@@ -6,7 +6,12 @@
   - addr RAM z start at 76800 (1pixel:1byte)
   	- front 4bit, back 4bit, z 8bit
 		- cal z in Q2.20 save in Q0.8 [0,1]
-  - addr Tri start at 153600
+  - addr Tri
+      // has tex
+      - start 153600: 	32768 byte: 256x256 tex
+      - start 186368: 	each tri: 28 byte
+      // no tex
+      - start 153600: 	each tri: 22 byte
 
 	gamepad_input 8 bit
 		0,1: +-rotX
@@ -14,20 +19,22 @@
 		4,5: +-Tz
 		6,7: +-rotY light
 
-  color mode 1
+  color mode 1 tex
   	0: black
   	1: blue
   	2: dark green
 		15:
 
-	color mode 2
+	color mode 2 flat shade
 		0: white
 		1: cyan
 		2: magenta
 		3: yellow
  
   VSFS
-  	// free state [130-139, 2-30]
+  	// free state [22-30, 130-139, 179-189, 224-229,233-239,243-249]
+  		4.5: use state 2-21 for uv*bar
+  		tex: use state 211-223
 		0. perframe, state [140-250], quota 800x430 = 340,000 clk
 			- Tz, rotx2 -> [M] ([Tz*Rx*Ry]) // cos table, set premul mat manually 
 			- dir light rot 1axis -> update formula
@@ -51,10 +58,12 @@
       4.2 denom
       4.3 x3: bar_init, bar_dx, bar_dy
       4.4 x3: z_bar, z_bar_dx, z_bar_dy
+      4.5 x2: uv*bar
     5. for pixel y in bbox (y < bboxMax_Y)
       - e0 = e0_init, z = z_bar / e0_init += dy, z_bar += z_bar_dy
       - for x in bbox (x < bboxMax_X)
         - READ x4 Z+B (42 clk)
+        - READ x4 texel (35 clk x2)
         // x4 pixel
         - if ((e0 < 0) && (e1 < 0) && (e2 < 0)) / e0 += dx, z += z_bar_dx
           - pixel[0-4].cz = (Z < Zbuffer)? cz: pixel[0-4].cz
@@ -87,6 +96,7 @@ module vsfs (
 
   	// gamepad input
   	input 	wire [7:0]  gamepad_input,
+  	input   wire 				has_tex,
   	
 
     // things to watch
@@ -208,13 +218,18 @@ module vsfs (
 	reg signed [15:0] MVP_31;
 	reg signed [15:0] MVP_32;
 	reg signed [15:0] MVP_33;
+	
 	// read tri from RAM
 	reg [4:0] read_delay;
 	reg [17:0] numread;  
 	reg [9:0] tri_idx;									// max 1024 tri
-	wire [14:0] tri_idx_addr;     			// in byte: numtri * 22 (2 x 3xyz x 3vert + 4 (normal/color));
-  assign tri_idx_addr = {1'b0,tri_idx,4'b0000} + {3'b0,tri_idx,2'b0} + {4'b0,tri_idx,1'b0};
-	reg signed [15:0] tri_xyz [10:0];		// 
+	wire [15:0] tri_idx_addr;     			// in byte: numtri * 22 (2 x 3xyz x 3vert + 4 (normal/color));
+  wire [15:0] tri_idx_addr_tex;
+  assign tri_idx_addr = {2'b0,tri_idx,4'b0} + {4'b0,tri_idx,2'b0} + {5'b0,tri_idx,1'b0};
+	assign tri_idx_addr_tex = {2'b0,tri_idx,4'b0} + {3'b0,tri_idx,3'b0} + {4'b0,tri_idx,2'b0} + {16'h8000};
+	
+	reg signed [15:0] tri_xyz [13:0];		
+	
 	// model space/NDC (use the same reg)
 	reg signed [15:0] x_model_v0;				// Q8.8 from file
 	reg signed [15:0] x_model_v1;
@@ -225,6 +240,12 @@ module vsfs (
 	reg signed [15:0] z_model_v0;				
 	reg signed [15:0] z_model_v1;
 	reg signed [15:0] z_model_v2;
+	reg [7:0] 				v0_u;							// Q8.0
+	reg [7:0] 				v0_v;
+	reg [7:0] 				v1_u;							
+	reg [7:0] 				v1_v;
+	reg [7:0] 				v2_u;							
+	reg [7:0] 				v2_v;
 	reg signed [15:0] x_clip_v0;				// Q8.8
 	reg signed [15:0] x_clip_v1;
 	reg signed [15:0] x_clip_v2;
@@ -293,14 +314,26 @@ module vsfs (
   reg signed [21:0] z_bar;						// Q6.16
   reg signed [21:0] z_bar_dx;
   reg signed [21:0] z_bar_dy;
+  // bar uv
+  reg signed [21:0] u_bar;						// Q14.8 (for neg/>1 out of tri bar) 
+  reg signed [21:0] u_bar_dx;
+  reg signed [21:0] u_bar_dy;
+  reg signed [21:0] v_bar;						
+  reg signed [21:0] v_bar_dx;
+  reg signed [21:0] v_bar_dy;
   // in for loop
   reg [9:0] pixel_y;									// Q10.0
   reg [9:0] pixel_x;
   reg signed [21:0] pixel_z;					// Q6.16
+  reg signed [21:0] pixel_u;					// Q10.12 -> Q8.0 when sampling tex
+  reg signed [21:0] pixel_v;
+  reg pixel_u8;	
   reg signed [19:0] e0;
   reg signed [19:0] e1;
   reg signed [19:0] e2;
   // 4-pixel Z, Color buffer
+  reg [7:0] db_texel;									// use for reading from RAM
+  reg [3:0] texel [3:0];							// Q4.0
   reg [7:0] Z_buffer [3:0];						// Q0.8
   reg [3:0] C_buffer [3:0];						// Q4.0
 
@@ -835,6 +868,12 @@ module vsfs (
 			z_model_v0 <= 0;				
 			z_model_v1 <= 0;
 			z_model_v2 <= 0;
+			v0_u <= 0;
+			v0_v <= 0;
+			v1_u <= 0;
+			v1_v <= 0;
+			v2_u <= 0;
+			v2_v <= 0;
 			x_clip_v0 <= 0;
 			x_clip_v1 <= 0;
 			x_clip_v2 <= 0;
@@ -905,10 +944,20 @@ module vsfs (
 	    z_bar <= 0;
 	    z_bar_dx <= 0;
 	    z_bar_dy <= 0;
-	    //Z_buffer[3:0], C_buffer[3:0]
+	    u_bar <= 0;// Q14.8 (for neg/>1 out of tri bar) -> Q8.0 when sampling tex
+		  u_bar_dx <= 0;
+		  u_bar_dy <= 0;
+		  v_bar <= 0;					
+		  v_bar_dx <= 0;
+		  v_bar_dy <= 0;
+		  db_texel <= 0;
+	    //Z_buffer[3:0], C_buffer[3:0], texel [3:0]
 	    pixel_y <= 0;
   		pixel_x <= 0;
   		pixel_z <= 0;
+  		pixel_u <= 0;
+  		pixel_v <= 0;
+  		pixel_u8 <= 0;
   		e0 <= 0;
   		e1 <= 0;
   		e2 <= 0;
@@ -1579,7 +1628,9 @@ module vsfs (
 						if (ram_notbusy) begin
 							vsfs_stop_txn <= 0;
 							vsfs_start_read <= 1;
-							vsfs_addr <= 24'd153600 + {9'b0,tri_idx_addr};
+							//
+							vsfs_addr <= (has_tex)? 24'd153600 + {8'b0,tri_idx_addr_tex} :
+																			24'd153600 + {8'b0,tri_idx_addr};
 							numread <= 0;
 							read_delay <= 0;
 							fsm_state <= 32;
@@ -1599,11 +1650,12 @@ module vsfs (
             read_delay <= read_delay + 1;
           end
 				end
-				//   -- read 43 more 4bit
+				//   -- read 43 more 4bit OR 55 more (tex)
         33: begin
         	tri_xyz[numread[5:2]][{~numread[1:0],2'b00} +: 4] <= spi_data;
           numread <= numread + 1;
-          if(numread == 43) begin
+          //
+          if(numread == ((has_tex)? 55:43)) begin
           	numread <= 0;
             vsfs_stop_txn <= 1;
             fsm_state <= 34;
@@ -1625,6 +1677,30 @@ module vsfs (
 					nz <= (tri_xyz[10][13] == 1'b1)? {6'b1111_11,tri_xyz[10][13:4]} : {6'b0,tri_xyz[10][13:4]};
 					ny <= (tri_xyz[10][3] == 1'b1)? {6'b1111_11,tri_xyz[10][3:0],tri_xyz[9][15:10]} : {6'b0,tri_xyz[10][3:0],tri_xyz[9][15:10]};
 					nx <= (tri_xyz[9][9] == 1'b1)? {6'b1111_11,tri_xyz[9][9:0]} : {6'b0,tri_xyz[9][9:0]};
+					//
+					if(has_tex)begin
+						v0_u <= tri_xyz[11][7:0];
+						//v0_v <= tri_xyz[11][15:8];
+						v1_u <= tri_xyz[12][7:0];
+						//v1_v <= tri_xyz[12][15:8];
+						v2_u <= tri_xyz[13][7:0];
+						//v2_v <= tri_xyz[13][15:8];
+
+						// v0_u <= 8'd255 - tri_xyz[11][7:0];
+						 v0_v <= 8'd255 - tri_xyz[11][15:8];
+						// v1_u <= 8'd255 - tri_xyz[12][7:0];
+						 v1_v <= 8'd255 - tri_xyz[12][15:8];
+						// v2_u <= 8'd255 - tri_xyz[13][7:0];
+						 v2_v <= 8'd255 - tri_xyz[13][15:8];
+					end else begin
+						v0_u <= 0;
+						v0_v <= 0;
+						v1_u <= 0;
+						v1_v <= 0;
+						v2_u <= 0;
+						v2_v <= 0;
+					end
+
 					fsm_state <= 35;
 				end
 
@@ -2273,11 +2349,10 @@ module vsfs (
 					end
 				end
 
-			//4.4 Z_bar
+			//4.4 Z_bar: state 105-114
 				// 		z_bar = z_screen_v0*bar_ix + z_screen_v1*bar_iy + z_screen_v2*bar_iz
 				// 		z_bar_dx = z_screen_v0*bar_ix_dx + z_screen_v1*bar_iy_dx + z_screen_v2*bar_iz_dx
 				// 		z_bar_dy = z_screen_v0*bar_ix_dy + z_screen_v1*bar_iy_dy + z_screen_v2*bar_iz_dy
-				//		Q2.20 * Q2.20 = Q4.40 -> Q2.20 [41:20]
 				//
 				//		Q2.20 * Q6.16 = Q8.36 -> Q6.16 [41:20]  same bit select
 				105: begin
@@ -2374,10 +2449,223 @@ module vsfs (
 						z_bar_dy <= z_bar_dy + mul_result[41:20];						// ready in 23clk for 20bit mul
 						//
 						pixel_y <= bboxMin_Y[9:0];
-						fsm_state <= 115;
+
+						if(has_tex)begin
+							// do uv*bar
+							fsm_state <= 2;
+						end else begin
+							// skip uv * bar
+							fsm_state <= 115;
+						end
+						
 					end
 				end
 			
+
+			//4.5 uv_bar: state 2-21
+				// 		u_bar = v0_u * bar_ix + v1_u * bar_iy + v2_u * bar_iz
+				// 		u_bar_dx = v0_u * bar_ix_dx + v1_u * bar_iy_dx + v2_u * bar_iz_dx
+				// 		u_bar_dy = v0_u * bar_ix_dy + v1_u * bar_iy_dy + v2_u * bar_iz_dy
+				//
+				//		Q8.0 -> Q8.14 * Q6.16 = Q14.30 -> Q14.8 [43:22]
+				//		mul will treat uv as signed
+				//		Q8.0 -> Q9.13 * Q6.16 = Q15.29 -> Q15.7 [43:22]
+				//		percision dx,dy
+				//		Q8.0 -> Q9.13 * Q6.16 = Q15.29 -> Q10.12 [38:17]  
+				2: begin
+					mul_a <= {1'b0,v0_u,13'b0};						
+					mul_b <= bar_ix;			
+					mul_start <= 1;
+					fsm_state <= 3;
+				end
+				3: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar <= mul_result[38:17] ;						
+						mul_a <= {1'b0,v1_u,13'b0};				
+						mul_b <= bar_iy;					
+						mul_start <= 1;
+						fsm_state <= 4;
+					end
+				end
+				4: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar <= u_bar + mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v2_u,13'b0};				
+						mul_b <= bar_iz;					
+						mul_start <= 1;
+						fsm_state <= 5;
+					end
+				end
+				5: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar <= u_bar + mul_result[38:17];						// ready in 23clk for 20bit mul
+						//
+						mul_a <= {1'b0,v0_u,13'b0};			
+						mul_b <= bar_ix_dx;					
+						mul_start <= 1;
+						fsm_state <= 6;
+					end
+				end
+				6: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar_dx <= mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v1_u,13'b0};				
+						mul_b <= bar_iy_dx;					
+						mul_start <= 1;
+						fsm_state <= 7;
+					end
+				end
+				7: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar_dx <= u_bar_dx + mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v2_u,13'b0};			
+						mul_b <= bar_iz_dx;					
+						mul_start <= 1;
+						fsm_state <= 8;
+					end
+				end
+				8: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar_dx <= u_bar_dx + mul_result[38:17];						// ready in 23clk for 20bit mul
+						//
+						mul_a <= {1'b0,v0_u,13'b0};			
+						mul_b <= bar_ix_dy;					
+						mul_start <= 1;
+						fsm_state <= 9;
+					end
+				end
+				9: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar_dy <= mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v1_u,13'b0};				
+						mul_b <= bar_iy_dy;					
+						mul_start <= 1;
+						fsm_state <= 10;
+					end
+				end
+				10: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar_dy <= u_bar_dy + mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v2_u,13'b0};			
+						mul_b <= bar_iz_dy;					
+						mul_start <= 1;
+						fsm_state <= 11;
+					end
+				end
+				11: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						u_bar_dy <= u_bar_dy + mul_result[38:17];						// ready in 23clk for 20bit mul
+						//
+						fsm_state <= 12;
+					end
+				end
+				12: begin
+					mul_a <= {1'b0,v0_v,13'b0};								
+					mul_b <= bar_ix;			
+					mul_start <= 1;
+					fsm_state <= 13;
+				end
+				13: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar <= mul_result[38:17];						
+						mul_a <= {1'b0,v1_v,13'b0};			
+						mul_b <= bar_iy;					
+						mul_start <= 1;
+						fsm_state <= 14;
+					end
+				end
+				14: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar <= v_bar + mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v2_v,13'b0};				
+						mul_b <= bar_iz;					
+						mul_start <= 1;
+						fsm_state <= 15;
+					end
+				end
+				15: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar <= v_bar + mul_result[38:17];						// ready in 23clk for 20bit mul
+						//
+						mul_a <= {1'b0,v0_v,13'b0};			
+						mul_b <= bar_ix_dx;					
+						mul_start <= 1;
+						fsm_state <= 16;
+					end
+				end
+				16: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar_dx <= mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v1_v,13'b0};				
+						mul_b <= bar_iy_dx;					
+						mul_start <= 1;
+						fsm_state <= 17;
+					end
+				end
+				17: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar_dx <= v_bar_dx + mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v2_v,13'b0};				
+						mul_b <= bar_iz_dx;					
+						mul_start <= 1;
+						fsm_state <= 18;
+					end
+				end
+				18: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar_dx <= v_bar_dx + mul_result[38:17];						// ready in 23clk for 20bit mul
+						//
+						mul_a <= {1'b0,v0_v,13'b0};			
+						mul_b <= bar_ix_dy;					
+						mul_start <= 1;
+						fsm_state <= 19;
+					end
+				end
+				19: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar_dy <= mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v1_v,13'b0};				
+						mul_b <= bar_iy_dy;					
+						mul_start <= 1;
+						fsm_state <= 20;
+					end
+				end
+				20: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar_dy <= v_bar_dy + mul_result[38:17];						// ready in 23clk for 20bit mul
+						mul_a <= {1'b0,v2_v,13'b0};			
+						mul_b <= bar_iz_dy;					
+						mul_start <= 1;
+						fsm_state <= 21;
+					end
+				end
+				21: begin
+					mul_start <= 0;
+					if (mul_done) begin
+						v_bar_dy <= v_bar_dy + mul_result[38:17];						// ready in 23clk for 20bit mul
+						//
+						fsm_state <= 115;
+					end
+				end
+
+
 			//5. for pixel y in bbox
 				// - e0 = e0_init, z = z_bar / e0_init += dy, z_bar += z_bar_dy
 				115: begin
@@ -2389,11 +2677,17 @@ module vsfs (
 						e1 <= e1_init;
 						e2 <= e2_init;
 						pixel_z <= z_bar;
+						pixel_u <= u_bar;
+						pixel_v <= v_bar;
 						//
 						e0_init <= e0_init - (x_screen_v1 - x_screen_v0);
 						e1_init <= e1_init - (x_screen_v2 - x_screen_v1);
 						e2_init <= e2_init - (x_screen_v0 - x_screen_v2);
 						z_bar <= z_bar + z_bar_dy;
+						u_bar <= u_bar + u_bar_dy;
+						v_bar <= v_bar + v_bar_dy;
+
+						//shade_color <= tri_idx[3:0];
 						//
 						pixel_x <= bboxMin_X[9:0];
 						fsm_state <= 116;
@@ -2470,9 +2764,175 @@ module vsfs (
           if(numread == 3)begin
             numread <= 0;
             vsfs_stop_txn <= 1;
-            fsm_state <= 122;
+
+            if(has_tex)begin
+            	// read texel x4
+            	fsm_state <= 211;
+            end else begin
+            	// skip read texel
+            	fsm_state <= 122;
+            end
           end
 				end
+
+				// uv Q10.12 -> Q8.0 [19:12]
+				//	- READ x4 texel (35 clk x2), state 211-225
+				211: begin
+					vsfs_stop_txn <= 0;
+					if (ram_notbusy) begin
+						vsfs_stop_txn <= 0;
+						vsfs_start_read <= 1;
+						// y * 160 + x/2  + z_start
+						// vsfs_addr <= {7'b0,pixel_y,7'b0} + {9'b0,pixel_y,5'b0} + {15'b0,pixel_x[9:1]};
+						// v * 128 + u/2 + 153600
+						vsfs_addr <= {9'b0,pixel_v[19:12],7'b0} + {17'b0,pixel_u[19:13]} + 153600;
+						pixel_u8 <= pixel_u[12];
+						pixel_u <= pixel_u + u_bar_dx;
+						pixel_v <= pixel_v + v_bar_dx;
+						numread <= 0;
+						read_delay <= 0;
+						fsm_state <= 212;
+					end
+				end
+				//   -- wait for the first flash data to be ready, read one 4-bit
+				212: begin
+					vsfs_start_read <= 0;
+          if(read_delay == 16) begin
+            read_delay <= 0;
+            db_texel[7:4] <= spi_data;
+            numread <= 1;
+            fsm_state <= 213;
+          end 
+          else begin
+            read_delay <= read_delay + 1;
+          end
+				end
+				//   -- read 1 more 4bit
+				213: begin
+					db_texel[3:0] <= spi_data;
+          numread <= 0;
+          vsfs_stop_txn <= 1;
+          fsm_state <= 214;
+				end
+
+				214: begin
+					texel[0] <= (pixel_u8 == 1)? db_texel[7:4] : db_texel[3:0];
+					//texel[0] <= db_texel[3:0];
+
+
+					vsfs_stop_txn <= 0;
+					vsfs_start_read <= 1;
+					// v * 128 + u/2 + 153600
+					vsfs_addr <= {9'b0,pixel_v[19:12],7'b0} + {17'b0,pixel_u[19:13]} + 153600;
+					pixel_u8 <= pixel_u[12];
+					pixel_u <= pixel_u + u_bar_dx;
+					pixel_v <= pixel_v + v_bar_dx;
+					numread <= 0;
+					read_delay <= 0;
+					fsm_state <= 215;
+				end
+				215: begin
+					vsfs_start_read <= 0;
+          if(read_delay == 16) begin
+            read_delay <= 0;
+            db_texel[7:4] <= spi_data;
+            numread <= 1;
+            fsm_state <= 216;
+          end 
+          else begin
+            read_delay <= read_delay + 1;
+          end
+				end
+				//   -- read 1 more 4bit
+				216: begin
+					db_texel[3:0] <= spi_data;
+          numread <= 0;
+          vsfs_stop_txn <= 1;
+          fsm_state <= 217;
+				end
+				217: begin
+					texel[1] <= (pixel_u8 == 1)? db_texel[7:4] : db_texel[3:0];
+					//texel[1] <= db_texel[3:0];
+
+					vsfs_stop_txn <= 0;
+					if (ram_notbusy) begin
+						vsfs_stop_txn <= 0;
+						vsfs_start_read <= 1;
+
+						vsfs_addr <= {9'b0,pixel_v[19:12],7'b0} + {17'b0,pixel_u[19:13]} + 153600;
+						pixel_u8 <= pixel_u[12];
+						pixel_u <= pixel_u + u_bar_dx;
+						pixel_v <= pixel_v + v_bar_dx;
+						numread <= 0;
+						read_delay <= 0;
+						fsm_state <= 218;
+					end
+				end
+				//   -- wait for the first flash data to be ready, read one 4-bit
+				218: begin
+					vsfs_start_read <= 0;
+          if(read_delay == 16) begin
+            read_delay <= 0;
+            db_texel[7:4] <= spi_data;
+            numread <= 1;
+            fsm_state <= 219;
+          end 
+          else begin
+            read_delay <= read_delay + 1;
+          end
+				end
+				//   -- read 1 more 4bit
+				219: begin
+					db_texel[3:0] <= spi_data;
+          numread <= 0;
+          vsfs_stop_txn <= 1;
+          fsm_state <= 220;
+				end
+
+				220: begin
+					texel[2] <= (pixel_u8 == 1)? db_texel[7:4] : db_texel[3:0];
+					//texel[2] <= db_texel[3:0];
+
+					vsfs_stop_txn <= 0;
+					vsfs_start_read <= 1;
+					// v * 128 + u/2 + 153600
+					vsfs_addr <= {9'b0,pixel_v[19:12],7'b0} + {17'b0,pixel_u[19:13]} + 153600;
+					pixel_u8 <= pixel_u[12];
+					pixel_u <= pixel_u + u_bar_dx;
+					pixel_v <= pixel_v + v_bar_dx;
+					numread <= 0;
+					read_delay <= 0;
+					fsm_state <= 221;
+				end
+				221: begin
+					vsfs_start_read <= 0;
+          if(read_delay == 16) begin
+            read_delay <= 0;
+            db_texel[7:4] <= spi_data;
+            numread <= 1;
+            fsm_state <= 222;
+          end 
+          else begin
+            read_delay <= read_delay + 1;
+          end
+				end
+				//   -- read 1 more 4bit
+				222: begin
+					db_texel[3:0] <= spi_data;
+          numread <= 0;
+          vsfs_stop_txn <= 1;
+          fsm_state <= 223;
+				end
+				223: begin
+					texel[3] <= (pixel_u8 == 1)? db_texel[7:4] : db_texel[3:0];
+					//texel[3] <= db_texel[3:0];
+
+					vsfs_stop_txn <= 0;
+					fsm_state <= 122;
+				end
+
+
+
 				// x4 pixel
 				//	- if ((e0 > 0) && (e1 > 0) && (e2 > 0)) / e0 += dx, z += z_bar_dx
 				//		- pixel[0-4].cz = (Z < Zbuffer)? cz: pixel[0-4].cz
@@ -2486,7 +2946,7 @@ module vsfs (
 						//C_buffer[0] <= (pixel_z[19:12] < Z_buffer[0])? tri_idx[3:0]+1 : C_buffer[0]; 
 						
 						C_buffer[0] <= ((pixel_z[15:8] < Z_buffer[0]) && (pixel_z[21:16] == 0))? 
-														shade_color : C_buffer[0]; 
+														((has_tex)? texel[0] : shade_color) : C_buffer[0]; 
 						Z_buffer[0] <= ((pixel_z[15:8] < Z_buffer[0]) && (pixel_z[21:16] == 0))? 
 														pixel_z[15:8] : Z_buffer[0]; 
 					end 
@@ -2500,7 +2960,7 @@ module vsfs (
 
 					if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) begin
 						C_buffer[1] <= ((pixel_z[15:8] < Z_buffer[1]) && (pixel_z[21:16] == 0))? 
-														shade_color : C_buffer[1]; 
+														((has_tex)? texel[1] : shade_color ) : C_buffer[1]; 
 						Z_buffer[1] <= ((pixel_z[15:8] < Z_buffer[1]) && (pixel_z[21:16] == 0))? 
 														pixel_z[15:8] : Z_buffer[1]; 
 					end 
@@ -2514,7 +2974,7 @@ module vsfs (
 
 					if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) begin
 						C_buffer[2] <= ((pixel_z[15:8] < Z_buffer[2]) && (pixel_z[21:16] == 0))? 
-														shade_color : C_buffer[2]; 
+														((has_tex)? texel[2] : shade_color ) : C_buffer[2]; 
 						Z_buffer[2] <= ((pixel_z[15:8] < Z_buffer[2]) && (pixel_z[21:16] == 0))? 
 														pixel_z[15:8] : Z_buffer[2]; 
 					end 
@@ -2528,7 +2988,7 @@ module vsfs (
 
 					if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)) begin
 						C_buffer[3] <= ((pixel_z[15:8] < Z_buffer[3]) && (pixel_z[21:16] == 0))? 
-														shade_color : C_buffer[3]; 
+														((has_tex)? texel[3] : shade_color ) : C_buffer[3]; 
 						Z_buffer[3] <= ((pixel_z[15:8] < Z_buffer[3]) && (pixel_z[21:16] == 0))? 
 														pixel_z[15:8] : Z_buffer[3]; 
 					end 
@@ -2612,12 +3072,12 @@ module vsfs (
 
   // debug
   // assign debug_vsfs_fsm_state = fsm_state;
-  // assign debug_x_model_v0 = dot_result;
-  // assign debug_x_model_v1 = x_model_v1;
-  // assign debug_x_model_v2 = x_model_v2;
-  // assign debug_y_model_v0 = y_model_v0;
-  // assign debug_y_model_v1 = y_model_v1;
-  // assign debug_y_model_v2 = y_model_v2;
+  // assign debug_x_model_v0 = {8'b0,v0_u};
+  // assign debug_x_model_v1 = {8'b0,v0_v};
+  // assign debug_x_model_v2 = {8'b0,v1_u};
+  // assign debug_y_model_v0 = {8'b0,v1_v};
+  // assign debug_y_model_v1 = {8'b0,v2_u};
+  // assign debug_y_model_v2 = {8'b0,v2_v};
   // assign debug_z_model_v0 = z_model_v0;
   // assign debug_z_model_v1 = z_model_v1;
   // assign debug_z_model_v2 = z_model_v2;
