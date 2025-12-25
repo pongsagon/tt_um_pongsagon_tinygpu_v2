@@ -1,6 +1,6 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
-![Texture](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/ff8.gif)
+ ![flat](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/bunny.gif)  ![Texture](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/ff8.gif) 
 
 # Tiny Tapeout Verilog Project Template
 
