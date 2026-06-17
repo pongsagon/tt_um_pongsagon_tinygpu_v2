@@ -23,7 +23,8 @@ TinyGPU v2.0. A standalone GPU that can display a model file from FLASH.
 
 ## How to test
 
-Updating document, Please come back again
+1. Flash a model file .bin from 3Dmodels folder to QSPI Flash PMOD
+2. 
 
 ## External hardware
 
