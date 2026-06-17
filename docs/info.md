@@ -33,8 +33,8 @@ Render 1K tri at 6.5fps in 320x240, 4-bit color. Tex res 256x256, 4-bit.
 
 1. Plug QSPI PMOD, TinyVGA PMOD, GamePad PMOD with SNES controller to the TT demo board
 2. Flash a model file .bin from 3Dmodels folder to QSPI Flash PMOD
-3. The default QSPI read lantency is already set to 0 via ui_in[2:0], if there is a problem of QSPI latency try setting the value to 1-4.
-4. The model should be rendered on the VGA monitor spinning.
+3. The default QSPI read latency is already set to 0 via ui_in[2:0], if there is a problem of QSPI latency try setting the value to 1-4.
+4. The model should be rendered spinning on the VGA monitor.
 5. Use D-pad to rotate model around X,Y axis.  A/B button to zoom in/out.  For model without texture, use X/Y button to rotate light.
 
 Current limitation
@@ -42,4 +42,4 @@ Current limitation
 
 ## 3D model file converter
 
-I will upload a 3d model converter that can be used with this TinyGPU v2.0 soon.
+I will upload an OBJ 3d model converter that can be used with this TinyGPU v2.0 soon.
