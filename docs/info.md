@@ -21,14 +21,21 @@ TinyGPU v2.0. A standalone GPU that can display a model file from FLASH.
 	- use Gamepad to transform the model and rotate light
 	- run at 25Mhz. When fab, it will use around 200k transistor  
 
-## How to test
-
-1. Flash a model file .bin from 3Dmodels folder to QSPI Flash PMOD
-2. 
-
 ## External hardware
 
 - QSPI PMOD
 - TinyVGA PMOD
 - GamePad PMOD
 - SNES controller
+
+## How to test
+
+1. Plug QSPI PMOD, TinyVGA PMOD, GamePad PMOD with SNES controller to the TT demo board
+2. Flash a model file .bin from 3Dmodels folder to QSPI Flash PMOD
+3. The default QSPI read lantency is already set to 0 via ui_in[2:0], if there is a problem of QSPI latency try setting the value to 1-4.
+4. The model should be rendered on the VGA monitor spinning.
+5. Use D-pad to rotate model around X,Y axis.  A/B button to zoom in/out.  For model without texture, use X/Y button to rotate light.
+
+## 3D model file converter
+
+I will upload a 3d model converter that can be used with this TinyGPU v2.0 soon.
