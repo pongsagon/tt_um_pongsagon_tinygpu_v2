@@ -7,6 +7,10 @@ You can also include images in this folder and reference them in the markdown. E
 512 kb in size, and the combined size of all images must be less than 1 MB.
 -->
 
+##  Prototyping results on Basys3 FPGA
+
+ ![flat](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/bunny.gif)  ![Texture](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/ff8.gif) 
+
 ## How it works
 
 TinyGPU v2.0. A standalone GPU that can display a textured model file from FLASH. \
