@@ -1,8 +1,12 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
+##  Tested on TinyTapeout ASIC
+
+ ![flat](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/asic.gif)
+
 ##  Tested on Basys3 FPGA
 
-Prototyping results on Basys3 FPGA.  The ASIC result will be available around July 2026.
+Prototyping results on Basys3 FPGA.
 
  ![flat](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/bunny.gif)  ![Texture](https://github.com/pongsagon/tt_um_pongsagon_tinygpu_v2/blob/main/img/ff8.gif) 
 
