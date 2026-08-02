@@ -46,4 +46,17 @@ Current limitation
 
 ## 3D model file converter
 
-I will upload an OBJ 3d model converter that can be used with this TinyGPU v2.0 soon.
+
+How to build/run in mac terminal
+ - install GLM library first
+ - The code is in OBJconverter folder
+
+Build
+- g++ *.cpp -o main -I includes
+
+Run 
+- place .obj file + tex.mem/tex.bin(optional) in input_model/
+- ./main input.obj true white \
+arg[1]: obj filename \
+arg[2]: has texture or not \
+arg[3]: model color choose from white, pink, cyan, green
