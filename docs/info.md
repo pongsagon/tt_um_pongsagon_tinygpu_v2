@@ -60,3 +60,6 @@ Run
 arg[1]: obj filename \
 arg[2]: has texture or not \
 arg[3]: model color choose from white, pink, cyan, green
+
+Output
+- it will output output.bin (binary file) for use with Flash and output.mem (text file) for use with FPGA BRAM
