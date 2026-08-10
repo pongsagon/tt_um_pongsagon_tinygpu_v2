@@ -45,7 +45,15 @@ Current limitation
 
 ## 3D model file converter
 
-How to build/run in mac terminal
+For model with texture, you have to convert the texture format first using python script img2binhex_tex.py in OBJconverter folder.
+- GPU can support the model with only one texture.
+- usage: python3 img2binhex_tex.py input_filename.jpeg tex.bin tex.mem
+- The output, tex.bin, will be embedded with the model file when calling OBJconverter.
+- tex.mem version is used for testing on FPGA BRAM
+- you may need to install pillow for python first.  brew install pillow
+
+
+How to build/run 3D model converter in mac terminal
  - install GLM library first
  - The code is in OBJconverter folder
 
